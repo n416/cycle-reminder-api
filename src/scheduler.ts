@@ -1,0 +1,137 @@
+import { db } from './config/firebase';
+import { client } from './index';
+import { TextChannel } from 'discord.js';
+import { Reminder } from './types';
+
+const remindersCollection = db.collection('reminders');
+const missedNotificationsCollection = db.collection('missedNotifications');
+const GRACE_PERIOD = 10 * 60 * 1000;
+
+const sendMessage = async (reminder: Reminder) => {
+  try {
+    const channel = await client.channels.fetch(reminder.channelId);
+    if (channel && channel instanceof TextChannel) {
+      await channel.send(reminder.message);
+      console.log(`[Scheduler] Sent reminder "${reminder.message}" to #${channel.name}`);
+    } else {
+      console.warn(`[Scheduler] Channel not found or not a text channel for reminder ID: ${reminder.id}`);
+    }
+  } catch (error) {
+    console.error(`[Scheduler] Failed to send message for reminder ${reminder.id}:`, error);
+  }
+}
+
+const calculateNextOccurrenceAfterSend = (reminder: Reminder, lastNotificationTime: Date): Date | null => {
+    const startDate = new Date(reminder.startTime);
+    if (isNaN(startDate.getTime())) return null;
+  
+    switch (reminder.recurrence.type) {
+      case 'none':
+        return null;
+  
+      case 'interval': {
+        let nextIntervalDate = new Date(lastNotificationTime);
+        nextIntervalDate.setHours(nextIntervalDate.getHours() + reminder.recurrence.hours);
+        return nextIntervalDate;
+      }
+  
+      case 'weekly': {
+        const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+        const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
+
+        if (targetDaysOfWeek.size === 0) return null;
+  
+        let nextDate = new Date(lastNotificationTime);
+        nextDate.setDate(nextDate.getDate() + 1);
+        
+        for (let i = 0; i < 7; i++) {
+            if (targetDaysOfWeek.has(nextDate.getDay())) {
+                let finalDate = new Date(nextDate);
+                finalDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+                return finalDate;
+            }
+            nextDate.setDate(nextDate.getDate() + 1);
+        }
+      }
+    }
+    return null;
+};
+
+let isChecking = false;
+
+export const checkAndSendReminders = async () => {
+  if (isChecking) {
+    console.log(`[Scheduler] Skip: Previous check is still running.`);
+    return;
+  }
+  isChecking = true;
+  console.log(`[Scheduler] Checking for due reminders at ${new Date().toLocaleTimeString('ja-JP')}`);
+
+  const now = new Date();
+  
+  try {
+    const snapshot = await remindersCollection
+      .where('status', '==', 'active')
+      .where('nextNotificationTime', '<=', now)
+      .get();
+
+    if (snapshot.empty) {
+      isChecking = false;
+      return;
+    }
+
+    console.log(`[Scheduler] Found ${snapshot.size} due reminder(s).`);
+
+    const promises = snapshot.docs.map(async (doc) => {
+      const reminder = { id: doc.id, ...doc.data() } as Reminder;
+      const notificationTime = reminder.nextNotificationTime.toDate();
+      const missedBy = now.getTime() - notificationTime.getTime();
+
+      if (missedBy < GRACE_PERIOD) {
+        await sendMessage(reminder);
+      } else {
+        console.warn(`[Scheduler] SKIPPED reminder "${reminder.message}" (too late by ${Math.round(missedBy / 60000)} mins)`);
+        await missedNotificationsCollection.add({
+            serverId: reminder.serverId,
+            reminderMessage: reminder.message,
+            missedAt: reminder.nextNotificationTime,
+            channelName: reminder.channel,
+            acknowledged: false,
+        });
+        
+        // --- ★★★ ここから追加 ★★★ ---
+        // 失敗ログが10件を超えたら古いものから削除する
+        const logsSnapshot = await missedNotificationsCollection
+          .where('serverId', '==', reminder.serverId)
+          .orderBy('missedAt', 'desc')
+          .get();
+        
+        if (logsSnapshot.size > 10) {
+          const surplus = logsSnapshot.size - 10;
+          for (let i = 0; i < surplus; i++) {
+            const oldestDoc = logsSnapshot.docs[logsSnapshot.size - 1 - i];
+            await oldestDoc.ref.delete();
+          }
+          console.log(`[Scheduler] Trimmed ${surplus} old missed notification(s) for server ${reminder.serverId}.`);
+        }
+        // --- ★★★ ここまで追加 ★★★ ---
+      }
+
+      const nextTime = calculateNextOccurrenceAfterSend(reminder, notificationTime);
+      
+      if (nextTime) {
+        await doc.ref.update({ nextNotificationTime: nextTime });
+      } else {
+        await doc.ref.update({ status: 'paused', nextNotificationTime: null });
+        console.log(`[Scheduler] Reminder ${reminder.id} was a one-time event and is now paused.`);
+      }
+    });
+
+    await Promise.all(promises);
+
+  } catch (error) {
+    console.error('[Scheduler] Error during reminder check:', error);
+  } finally {
+    isChecking = false;
+  }
+};
