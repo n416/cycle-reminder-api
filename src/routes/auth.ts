@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import axios from 'axios';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
@@ -7,12 +7,12 @@ import { db } from '../config/firebase';
 dotenv.config();
 const router = Router();
 
-router.get('/discord', (_req, res) => {
+router.get('/discord', (_req: Request, res: Response) => {
   const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI!)}&response_type=code&scope=identify%20guilds`;
   res.redirect(discordAuthUrl);
 });
 
-router.get('/discord/callback', async (req, res) => {
+router.get('/discord/callback', async (req: Request, res: Response) => {
   const { code, error } = req.query;
 
   if (error === 'access_denied') {
