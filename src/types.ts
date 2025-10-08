@@ -13,7 +13,8 @@ export interface Reminder {
   recurrence: RecurrenceRule;
   status: 'active' | 'paused';
   createdBy: string;
-  nextNotificationTime?: any; // Firestore Timestamp
+  nextNotificationTime?: any;
+  selectedEmojis?: string[];
 }
 
 // --- ★★★ ここから追加 ★★★ ---

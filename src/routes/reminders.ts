@@ -67,6 +67,13 @@ const calculateNextOccurrence = (reminder: Omit<Reminder, 'id' | 'createdBy' | '
     return null;
 };
 
+const sanitizeMessage = (message: string): string => {
+  return message
+    .replace(/@everyone/g, '＠everyone')
+    .replace(/@here/g, '＠here')
+    .replace(/<@&(\d+)>/g, '＠ロール')
+    .replace(/<@!?(\d+)>/g, '＠ユーザー');
+};
 
 router.get('/:serverId', protect, async (req: AuthRequest, res) => {
   try {
@@ -91,6 +98,7 @@ router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) =
       serverId: serverId, 
       createdBy: req.user.id,
       nextNotificationTime: nextNotificationTime,
+      selectedEmojis: reminderData.selectedEmojis || [],
     };
     
     const docRef = await remindersCollection.add(newReminderData);
@@ -114,7 +122,10 @@ router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) =
 router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
-    const updatedData = req.body;
+    const updatedData = {
+      ...req.body,
+      selectedEmojis: req.body.selectedEmojis || [],
+    };
     const docRef = remindersCollection.doc(id);
     const beforeSnap = await docRef.get();
     const beforeData = beforeSnap.data();
@@ -172,18 +183,9 @@ router.delete('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
   }
 });
 
-// --- ★★★ ここから修正 ★★★ ---
-const sanitizeMessage = (message: string): string => {
-  return message
-    .replace(/@everyone/g, '＠everyone')
-    .replace(/@here/g, '＠here')
-    .replace(/<@&(\d+)>/g, '＠ロール')
-    .replace(/<@!?(\d+)>/g, '＠ユーザー');
-};
-
 router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
-    const { channelId, message } = req.body;
+    const { channelId, message, selectedEmojis } = req.body;
 
     if (!channelId || !message) {
       return res.status(400).json({ message: 'channelId and message are required.' });
@@ -192,7 +194,18 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
     const channel = await client.channels.fetch(channelId);
     if (channel && channel instanceof TextChannel) {
       const testMessage = `＝＝＝テスト送信です＝＝＝\n${sanitizeMessage(message)}`;
-      await channel.send(testMessage);
+      const sentMessage = await channel.send(testMessage);
+
+      if (selectedEmojis && selectedEmojis.length > 0) {
+        for (const emojiId of selectedEmojis) {
+          try {
+            await sentMessage.react(emojiId);
+          } catch (reactError) {
+            console.warn(`[Test Send] Failed to react with emoji ${emojiId}.`);
+          }
+        }
+      }
+
       res.status(200).json({ message: 'Test message sent successfully.' });
     } else {
       res.status(404).json({ message: 'Channel not found or is not a text channel.' });
@@ -202,6 +215,5 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
     res.status(500).json({ error: 'Failed to send test message' });
   }
 });
-// --- ★★★ ここまで修正 ★★★ ---
 
 export default router;

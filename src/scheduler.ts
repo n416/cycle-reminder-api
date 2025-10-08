@@ -7,15 +7,35 @@ const remindersCollection = db.collection('reminders');
 const missedNotificationsCollection = db.collection('missedNotifications');
 const GRACE_PERIOD = 10 * 60 * 1000;
 
+const sanitizeMessage = (message: string): string => {
+  return message
+    .replace(/@everyone/g, '＠everyone')
+    .replace(/@here/g, '＠here')
+    .replace(/<@&(\d+)>/g, '＠ロール')
+    .replace(/<@!?(\d+)>/g, '＠ユーザー');
+};
+
 const sendMessage = async (reminder: Reminder) => {
   try {
     const channel = await client.channels.fetch(reminder.channelId);
     if (channel && channel instanceof TextChannel) {
-      // --- ★★★ ここを修正 ★★★ ---
-      // sanitizeMessageを削除し、元のメッセージをそのまま送信する
-      await channel.send(reminder.message);
-      // --- ★★★ ここまで修正 ★★★ ---
+      const safeMessage = sanitizeMessage(reminder.message);
+
+      // ★ メッセージを送信し、その結果を受け取る
+      const sentMessage = await channel.send(safeMessage);
       console.log(`[Scheduler] Sent reminder "${reminder.message}" to #${channel.name}`);
+
+      // ★ 送信したメッセージに絵文字でリアクションする
+      if (reminder.selectedEmojis && reminder.selectedEmojis.length > 0) {
+        for (const emojiId of reminder.selectedEmojis) {
+          try {
+            await sentMessage.react(emojiId);
+          } catch (reactError) {
+            console.warn(`[Scheduler] Failed to react with emoji ${emojiId} for reminder ${reminder.id}. Emoji might be deleted.`);
+          }
+        }
+      }
+
     } else {
       console.warn(`[Scheduler] Channel not found or not a text channel for reminder ID: ${reminder.id}`);
     }

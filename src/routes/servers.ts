@@ -6,14 +6,13 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { FieldValue } from 'firebase-admin/firestore';
 import channelsRouter from './channels'; // ★ channelsRouterをインポート
+import emojisRouter from './emojis'; // ★ emojisRouterをインポート
 
 const router = Router();
 
-// --- ★★★ ここから修正 ★★★ ---
 // /:serverId/channels へのリクエストをchannelsRouterに委譲する
 router.use('/:serverId/channels', channelsRouter);
-// --- ★★★ ここまで修正 ★★★ ---
-
+router.use('/:serverId/emojis', emojisRouter); // ★ emojisRouterを登録
 
 // GET / - ユーザーが所属するサーバー一覧を取得
 router.get('/', protect, async (req: AuthRequest, res) => {
