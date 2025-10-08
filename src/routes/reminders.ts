@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { db } from '../config/firebase';
 import { protect, protectWrite, AuthRequest } from '../middleware/auth';
 import { Reminder } from '../types';
+import { client } from '../index';
+import { TextChannel } from 'discord.js';
 
 const router = Router();
 const remindersCollection = db.collection('reminders');
@@ -19,8 +21,7 @@ const addLogWithTrim = async (logData: object) => {
   }
 };
 
-// 次の通知時刻を計算する関数（新規作成・更新時に使用）
-const calculateNextOccurrence = (reminder: Omit<Reminder, 'id' | 'createdBy'>, baseTime: Date): Date | null => {
+const calculateNextOccurrence = (reminder: Omit<Reminder, 'id' | 'createdBy' | 'channel' | 'message' | 'status'>, baseTime: Date): Date | null => {
     const startDate = new Date(reminder.startTime);
     if (isNaN(startDate.getTime())) return null;
   
@@ -66,6 +67,7 @@ const calculateNextOccurrence = (reminder: Omit<Reminder, 'id' | 'createdBy'>, b
     return null;
 };
 
+
 router.get('/:serverId', protect, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
@@ -83,7 +85,7 @@ router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) =
     const { serverId } = req.params;
     const { userId, ...reminderData } = req.body;
     
-    const nextNotificationTime = calculateNextOccurrence(reminderData, new Date());
+    const nextNotificationTime = calculateNextOccurrence(reminderData as any, new Date());
     const newReminderData = { 
       ...reminderData, 
       serverId: serverId, 
@@ -121,7 +123,7 @@ router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Reminder not found." });
     }
     
-    const nextNotificationTime = calculateNextOccurrence(updatedData, new Date());
+    const nextNotificationTime = calculateNextOccurrence(updatedData as any, new Date());
     await docRef.update({ ...updatedData, nextNotificationTime });
 
     await addLogWithTrim({
@@ -169,5 +171,37 @@ router.delete('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
     res.status(500).json({ error: 'Failed to delete reminder' });
   }
 });
+
+// --- ★★★ ここから修正 ★★★ ---
+const sanitizeMessage = (message: string): string => {
+  return message
+    .replace(/@everyone/g, '＠everyone')
+    .replace(/@here/g, '＠here')
+    .replace(/<@&(\d+)>/g, '＠ロール')
+    .replace(/<@!?(\d+)>/g, '＠ユーザー');
+};
+
+router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthRequest, res) => {
+  try {
+    const { channelId, message } = req.body;
+
+    if (!channelId || !message) {
+      return res.status(400).json({ message: 'channelId and message are required.' });
+    }
+
+    const channel = await client.channels.fetch(channelId);
+    if (channel && channel instanceof TextChannel) {
+      const testMessage = `＝＝＝テスト送信です＝＝＝\n${sanitizeMessage(message)}`;
+      await channel.send(testMessage);
+      res.status(200).json({ message: 'Test message sent successfully.' });
+    } else {
+      res.status(404).json({ message: 'Channel not found or is not a text channel.' });
+    }
+  } catch (error) {
+    console.error("Failed to send test message:", error);
+    res.status(500).json({ error: 'Failed to send test message' });
+  }
+});
+// --- ★★★ ここまで修正 ★★★ ---
 
 export default router;
