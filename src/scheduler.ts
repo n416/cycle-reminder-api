@@ -7,22 +7,14 @@ const remindersCollection = db.collection('reminders');
 const missedNotificationsCollection = db.collection('missedNotifications');
 const GRACE_PERIOD = 10 * 60 * 1000;
 
-// --- ★★★ ここから修正 ★★★ ---
-const sanitizeMessage = (message: string): string => {
-  return message
-    .replace(/@everyone/g, '＠everyone')
-    .replace(/@here/g, '＠here')
-    .replace(/<@&(\d+)>/g, '＠ロール')
-    .replace(/<@!?(\d+)>/g, '＠ユーザー');
-};
-
 const sendMessage = async (reminder: Reminder) => {
   try {
     const channel = await client.channels.fetch(reminder.channelId);
     if (channel && channel instanceof TextChannel) {
-      // 本番の通知でもメンションを無害化する
-      const safeMessage = sanitizeMessage(reminder.message);
-      await channel.send(safeMessage);
+      // --- ★★★ ここを修正 ★★★ ---
+      // sanitizeMessageを削除し、元のメッセージをそのまま送信する
+      await channel.send(reminder.message);
+      // --- ★★★ ここまで修正 ★★★ ---
       console.log(`[Scheduler] Sent reminder "${reminder.message}" to #${channel.name}`);
     } else {
       console.warn(`[Scheduler] Channel not found or not a text channel for reminder ID: ${reminder.id}`);
@@ -31,7 +23,6 @@ const sendMessage = async (reminder: Reminder) => {
     console.error(`[Scheduler] Failed to send message for reminder ${reminder.id}:`, error);
   }
 }
-// --- ★★★ ここまで修正 ★★★ ---
 
 const calculateNextOccurrenceAfterSend = (reminder: Reminder, lastNotificationTime: Date): Date | null => {
   const startDate = new Date(reminder.startTime);
