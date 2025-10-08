@@ -16,21 +16,35 @@ const PORT = process.env.PORT || 8080;
 
 export const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-const SCHEDULER_INTERVAL = 60 * 1000;
+const SCHEDULER_INTERVAL = 60 * 1000; // 1分
 
-const runScheduler = () => {
-  checkAndSendReminders()
-    .catch(console.error)
-    .finally(() => {
-      setTimeout(runScheduler, SCHEDULER_INTERVAL);
-    });
+// --- ★★★ ここからスケジューラーの起動ロジックを修正 ★★★ ---
+const startScheduler = () => {
+  const now = new Date();
+  const seconds = now.getSeconds();
+  const milliseconds = now.getMilliseconds();
+  
+  // 次の分の00秒までの残り時間を計算
+  const delay = (60 - seconds) * 1000 - milliseconds;
+
+  console.log(`[Scheduler] Starting scheduler. First check will run in ${delay / 1000} seconds.`);
+
+  setTimeout(() => {
+    // 最初のチェックを実行
+    checkAndSendReminders().catch(console.error);
+    
+    // その後は正確に1分ごとに実行
+    setInterval(() => {
+      checkAndSendReminders().catch(console.error);
+    }, SCHEDULER_INTERVAL);
+  }, delay);
 };
 
 client.once('ready', () => {
   console.log(`Bot logged in as ${client.user?.tag}!`);
-  console.log('[Scheduler] Starting scheduler...');
-  runScheduler();
+  startScheduler(); // 修正した起動関数を呼び出す
 });
+// --- ★★★ ここまで修正 ★★★ ---
 
 client.login(process.env.DISCORD_BOT_TOKEN);
 
