@@ -5,16 +5,14 @@ import { client } from '../index';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { FieldValue } from 'firebase-admin/firestore';
-import channelsRouter from './channels'; // ★ channelsRouterをインポート
-import emojisRouter from './emojis'; // ★ emojisRouterをインポート
+import channelsRouter from './channels';
+import emojisRouter from './emojis';
 
 const router = Router();
 
-// /:serverId/channels へのリクエストをchannelsRouterに委譲する
 router.use('/:serverId/channels', channelsRouter);
-router.use('/:serverId/emojis', emojisRouter); // ★ emojisRouterを登録
+router.use('/:serverId/emojis', emojisRouter);
 
-// GET / - ユーザーが所属するサーバー一覧を取得
 router.get('/', protect, async (req: AuthRequest, res) => {
   try {
     const userId = req.user.id;
@@ -45,7 +43,6 @@ router.get('/', protect, async (req: AuthRequest, res) => {
   }
 });
 
-// PUT /:serverId/password - パスワードを設定
 router.put('/:serverId/password', protect, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
@@ -54,6 +51,12 @@ router.put('/:serverId/password', protect, async (req: AuthRequest, res) => {
 
     const userDoc = await db.collection('users').doc(userId).get();
     const userData = userDoc.data();
+
+    const appRole = userData?.subscriptionStatus;
+    if (appRole !== 'active' && appRole !== 'tester') {
+        return res.status(403).json({ message: 'Forbidden: Only owners or testers can change server settings.' });
+    }
+
     const serverInfo = userData?.guilds.find((g: any) => g.id === serverId);
 
     if (!serverInfo) {
@@ -94,7 +97,7 @@ router.put('/:serverId/password', protect, async (req: AuthRequest, res) => {
   }
 });
 
-// POST /:serverId/verify-password - パスワードを検証
+// ★★★★★ ここからがセキュリティー修正箇所です ★★★★★
 router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
@@ -112,10 +115,13 @@ router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res)
       return res.status(403).json({ message: 'Forbidden: You are not a member of this server.' });
     }
     
-    const permissions = BigInt(serverInfo.permissions);
-    const isAdmin = (permissions & BigInt(0x20)) === BigInt(0x20);
+    // Discord上の管理者権限と、アプリ上の権限の両方を取得
+    const isDiscordAdmin = (BigInt(serverInfo.permissions) & BigInt(0x20)) === BigInt(0x20);
+    const appRole = userData?.subscriptionStatus;
+    const hasAdminRights = isDiscordAdmin && (appRole === 'active' || appRole === 'tester');
 
-    if (isAdmin) {
+    // ケース1: Discord管理者かつアプリのオーナー/テスター => パスワード不要で即時トークン発行
+    if (hasAdminRights) {
       const writeToken = jwt.sign(
         { userId: userId, serverId: serverId, grant: 'write' },
         process.env.DISCORD_CLIENT_SECRET!, { expiresIn: '1h' }
@@ -123,22 +129,27 @@ router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res)
       return res.status(200).json({ writeToken });
     }
 
+    // ケース2: 上記以外（サポーターなど）=> パスワードの検証が必須
     const serverDoc = await db.collection('servers').doc(serverId).get();
     const serverData = serverDoc.data();
 
+    // サーバーにパスワードが設定されていなければ、編集不可
     if (!serverData || !serverData.passwordHash) {
       return res.status(403).json({ message: 'A password has not been set for this server.' });
     }
     
+    // 送られてきたパスワードが空かチェック
     if (typeof password !== 'string' || !password) {
       return res.status(400).json({ message: 'Password is required.' });
     }
 
+    // パスワードを比較
     const isValid = await bcrypt.compare(password, serverData.passwordHash);
     if (!isValid) {
       return res.status(403).json({ message: 'Invalid password.' });
     }
 
+    // 検証成功、トークンを発行
     const writeToken = jwt.sign(
       { userId: userId, serverId: serverId, grant: 'write' },
       process.env.DISCORD_CLIENT_SECRET!, { expiresIn: '1h' }
@@ -150,6 +161,7 @@ router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res)
     res.status(500).json({ message: 'Failed to verify password' });
   }
 });
+// ★★★★★ ここまで ★★★★★
 
 
 export default router;

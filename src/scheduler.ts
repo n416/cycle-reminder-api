@@ -2,10 +2,45 @@ import { db } from './config/firebase';
 import { client } from './index';
 import { TextChannel } from 'discord.js';
 import { Reminder } from './types';
+import { FieldValue } from 'firebase-admin/firestore';
 
 const remindersCollection = db.collection('reminders');
 const missedNotificationsCollection = db.collection('missedNotifications');
 const GRACE_PERIOD = 10 * 60 * 1000;
+
+const cleanupStalePendingUsers = async () => {
+  console.log('[Scheduler] Running cleanup for stale pending users...');
+  const threshold = new Date();
+  threshold.setHours(threshold.getHours() - 24);
+
+  try {
+    const staleUsersSnapshot = await db.collection('users')
+      .where('subscriptionStatus', '==', 'pending')
+      .where('pendingSince', '<', threshold)
+      .get();
+
+    if (staleUsersSnapshot.empty) {
+      console.log('[Scheduler] No stale pending users found.');
+      return;
+    }
+
+    console.log(`[Scheduler] Found ${staleUsersSnapshot.size} stale pending user(s). Reverting to 'inactive'.`);
+
+    const batch = db.batch();
+    staleUsersSnapshot.forEach(doc => {
+      batch.update(doc.ref, { 
+        subscriptionStatus: 'inactive',
+        pendingSince: FieldValue.delete(),
+      });
+    });
+
+    await batch.commit();
+    console.log('[Scheduler] Cleanup of stale pending users finished successfully.');
+
+  } catch (error) {
+    console.error('[Scheduler] Error during cleanup of stale pending users:', error);
+  }
+}
 
 const sanitizeMessage = (message: string): string => {
   return message
@@ -20,24 +55,20 @@ const sendMessage = async (reminder: Reminder) => {
     const channel = await client.channels.fetch(reminder.channelId);
     if (channel && channel instanceof TextChannel) {
       const safeMessage = sanitizeMessage(reminder.message);
-
-      // ★ メッセージを送信し、その結果を受け取る
       const sentMessage = await channel.send(safeMessage);
       console.log(`[Scheduler] Sent reminder "${reminder.message}" to #${channel.name}`);
 
-      // ★ 送信したメッセージに絵文字でリアクションする
       if (reminder.selectedEmojis && reminder.selectedEmojis.length > 0) {
         for (const emojiId of reminder.selectedEmojis) {
           try {
             await sentMessage.react(emojiId);
           } catch (reactError) {
-            console.warn(`[Scheduler] Failed to react with emoji ${emojiId} for reminder ${reminder.id}. Emoji might be deleted.`);
+            console.warn(`[Scheduler] Failed to react with emoji ${emojiId} for reminder ${reminder.id}.`);
           }
         }
       }
-
     } else {
-      console.warn(`[Scheduler] Channel not found or not a text channel for reminder ID: ${reminder.id}`);
+      console.warn(`[Scheduler] Channel not found for reminder ID: ${reminder.id}`);
     }
   } catch (error) {
     console.error(`[Scheduler] Failed to send message for reminder ${reminder.id}:`, error);
@@ -51,22 +82,17 @@ const calculateNextOccurrenceAfterSend = (reminder: Reminder, lastNotificationTi
   switch (reminder.recurrence.type) {
     case 'none':
       return null;
-
     case 'interval': {
       let nextIntervalDate = new Date(lastNotificationTime);
       nextIntervalDate.setHours(nextIntervalDate.getHours() + reminder.recurrence.hours);
       return nextIntervalDate;
     }
-
     case 'weekly': {
       const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
       const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
-
       if (targetDaysOfWeek.size === 0) return null;
-
       let nextDate = new Date(lastNotificationTime);
       nextDate.setDate(nextDate.getDate() + 1);
-
       for (let i = 0; i < 7; i++) {
         if (targetDaysOfWeek.has(nextDate.getDay())) {
           let finalDate = new Date(nextDate);
@@ -89,6 +115,8 @@ export const checkAndSendReminders = async () => {
   }
   isChecking = true;
   console.log(`[Scheduler] Checking for due reminders at ${new Date().toLocaleTimeString('ja-JP')}`);
+  
+  await cleanupStalePendingUsers();
 
   const now = new Date();
 
@@ -113,7 +141,7 @@ export const checkAndSendReminders = async () => {
       if (missedBy < GRACE_PERIOD) {
         await sendMessage(reminder);
       } else {
-        console.warn(`[Scheduler] SKIPPED reminder "${reminder.message}" (too late by ${Math.round(missedBy / 60000)} mins)`);
+        console.warn(`[Scheduler] SKIPPED reminder "${reminder.message}" (too late)`);
         await missedNotificationsCollection.add({
           serverId: reminder.serverId,
           reminderMessage: reminder.message,
@@ -126,14 +154,11 @@ export const checkAndSendReminders = async () => {
           .where('serverId', '==', reminder.serverId)
           .orderBy('missedAt', 'desc')
           .get();
-
         if (logsSnapshot.size > 10) {
           const surplus = logsSnapshot.size - 10;
           for (let i = 0; i < surplus; i++) {
-            const oldestDoc = logsSnapshot.docs[logsSnapshot.size - 1 - i];
-            await oldestDoc.ref.delete();
+            await logsSnapshot.docs[logsSnapshot.size - 1 - i].ref.delete();
           }
-          console.log(`[Scheduler] Trimmed ${surplus} old missed notification(s) for server ${reminder.serverId}.`);
         }
       }
 
@@ -143,7 +168,6 @@ export const checkAndSendReminders = async () => {
         await doc.ref.update({ nextNotificationTime: nextTime });
       } else {
         await doc.ref.update({ status: 'paused', nextNotificationTime: null });
-        console.log(`[Scheduler] Reminder ${reminder.id} was a one-time event and is now paused.`);
       }
     });
 
