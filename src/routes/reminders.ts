@@ -21,51 +21,58 @@ const addLogWithTrim = async (logData: object) => {
   }
 };
 
+// ★★★★★ ここからが修正箇所です ★★★★★
 const calculateNextOccurrence = (reminder: Omit<Reminder, 'id' | 'createdBy' | 'channel' | 'message' | 'status'>, baseTime: Date): Date | null => {
-    const startDate = new Date(reminder.startTime);
-    if (isNaN(startDate.getTime())) return null;
-  
-    switch (reminder.recurrence.type) {
-      case 'none':
-        return startDate >= baseTime ? startDate : null;
-  
-      case 'interval': {
-        let nextIntervalDate = new Date(startDate);
-        while (nextIntervalDate <= baseTime) {
-          nextIntervalDate.setHours(nextIntervalDate.getHours() + reminder.recurrence.hours);
-        }
-        return nextIntervalDate;
-      }
-  
-      case 'weekly': {
-        const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
-        const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
+  const startDate = new Date(reminder.startTime);
+  if (isNaN(startDate.getTime())) return null;
 
-        if (targetDaysOfWeek.size === 0) return null;
-  
-        let nextDate = new Date(baseTime);
-        nextDate.setHours(startDate.getHours(), startDate.getMinutes(), startDate.getSeconds(), 0);
+  switch (reminder.recurrence.type) {
+    case 'none':
+      // 基準時刻より後であれば、その日時を返す
+      return startDate >= baseTime ? startDate : null;
 
-        if (nextDate <= baseTime) {
-            nextDate.setDate(nextDate.getDate() + 1);
-        }
-        
-        for (let i = 0; i < 7; i++) {
-            if (targetDaysOfWeek.has(nextDate.getDay())) {
-                let finalDate = new Date(nextDate);
-                finalDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
-                if(finalDate < startDate) {
-                    nextDate.setDate(nextDate.getDate() + 1);
-                    continue;
-                };
-                return finalDate;
-            }
-            nextDate.setDate(nextDate.getDate() + 1);
-        }
+    case 'interval': {
+      // 基準時刻を越えるまで、開始時刻から間隔を足し続ける
+      let nextDate = new Date(startDate);
+      while (nextDate <= baseTime) {
+        nextDate.setHours(nextDate.getHours() + reminder.recurrence.hours);
       }
+      return nextDate;
     }
-    return null;
+
+    case 'weekly': {
+      const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+      const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
+
+      if (targetDaysOfWeek.size === 0) return null;
+
+      // 検索開始日時を設定（基準時刻より過去にはならないように）
+      let nextDate = baseTime > startDate ? new Date(baseTime) : new Date(startDate);
+
+      // ユーザーが指定した「時刻」をnextDateにセットする
+      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+
+      // もし計算した今日の予定時刻がすでに過ぎていたら、検索開始を明日にする
+      if (nextDate <= baseTime) {
+        nextDate.setDate(nextDate.getDate() + 1);
+      }
+
+      // 最大7日間（1週間）ループして、次の該当日を探す
+      for (let i = 0; i < 7; i++) {
+        if (targetDaysOfWeek.has(nextDate.getDay())) {
+          // 該当日が見つかったので、その日付を返す
+          return nextDate;
+        }
+        // 次の日に移動
+        nextDate.setDate(nextDate.getDate() + 1);
+      }
+      // 1週間探しても見つからなかった（＝曜日が指定されていないなど）
+      return null;
+    }
+  }
+  return null;
 };
+// ★★★★★ ここまで ★★★★★
 
 const sanitizeMessage = (message: string): string => {
   return message
@@ -91,16 +98,16 @@ router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) =
   try {
     const { serverId } = req.params;
     const { userId, ...reminderData } = req.body;
-    
+
     const nextNotificationTime = calculateNextOccurrence(reminderData as any, new Date());
-    const newReminderData = { 
-      ...reminderData, 
-      serverId: serverId, 
+    const newReminderData = {
+      ...reminderData,
+      serverId: serverId,
       createdBy: req.user.id,
       nextNotificationTime: nextNotificationTime,
       selectedEmojis: reminderData.selectedEmojis || [],
     };
-    
+
     const docRef = await remindersCollection.add(newReminderData);
     const result = { id: docRef.id, ...newReminderData };
 
@@ -133,7 +140,7 @@ router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
     if (!beforeData) {
       return res.status(404).json({ error: "Reminder not found." });
     }
-    
+
     const nextNotificationTime = calculateNextOccurrence(updatedData as any, new Date());
     await docRef.update({ ...updatedData, nextNotificationTime });
 
@@ -175,7 +182,7 @@ router.delete('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
         serverId: beforeData.serverId,
       });
     }
-    
+
     res.status(200).json({ message: 'Reminder deleted successfully' });
   } catch (error) {
     console.error("Failed to delete reminder:", error);
