@@ -89,7 +89,7 @@ export const checkAndSendReminders = async () => {
     return;
   }
   isChecking = true;
-  console.log(`[Scheduler] Checking for due reminders at ${new Date().toLocaleTimeString('ja-JP')}`);
+  // console.log(`[Scheduler] Checking for due reminders at ${new Date().toLocaleTimeString('ja-JP')}`);
 
   const now = new Date();
 
