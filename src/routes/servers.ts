@@ -1,3 +1,5 @@
+// back-src/routes/servers.ts
+
 import { Router } from 'express';
 import { db } from '../config/firebase';
 import { protect, AuthRequest } from '../middleware/auth';
@@ -20,19 +22,32 @@ router.get('/', protect, async (req: AuthRequest, res) => {
     if (!userDoc.exists) {
       return res.status(404).json({ message: 'User not found in database' });
     }
-    const { guilds } = userDoc.data()!;
+    const userData = userDoc.data()!;
+    // ★★★★★ 修正点 1: データベースではなく、認証トークンのロールを使用 ★★★★★
+    const { guilds } = userData;
+    const subscriptionStatus = req.user.role;
+
     if (!guilds) {
       return res.status(404).json({ message: 'Guilds not found for user. Please try logging in again.' });
     }
     const botGuilds = new Set(client.guilds.cache.map(g => g.id));
+
     const servers = guilds.map((guild: any) => {
       const permissions = BigInt(guild.permissions);
-      const isAdmin = (permissions & BigInt(0x20)) === BigInt(0x20);
+      const isDiscordAdmin = (permissions & BigInt(0x20)) === BigInt(0x20);
+
+      let finalRole = 'member';
+      if (subscriptionStatus === 'tester' || subscriptionStatus === 'owner' || (subscriptionStatus === 'active' && isDiscordAdmin)) {
+        finalRole = 'admin';
+      } else if (isDiscordAdmin) {
+        finalRole = 'admin';
+      }
+
       return {
         id: guild.id,
         name: guild.name,
         icon: guild.icon,
-        role: isAdmin ? 'admin' : 'member',
+        role: finalRole,
         isAdded: botGuilds.has(guild.id),
       }
     });
@@ -49,14 +64,14 @@ router.put('/:serverId/password', protect, async (req: AuthRequest, res) => {
     const { password } = req.body;
     const userId = req.user.id;
 
-    const userDoc = await db.collection('users').doc(userId).get();
-    const userData = userDoc.data();
-
-    const appRole = userData?.subscriptionStatus;
-    if (appRole !== 'active' && appRole !== 'tester') {
+    // ★★★★★ 修正点 2: データベースではなく、認証トークンのロールを使用 ★★★★★
+    const appRole = req.user.role;
+    if (appRole !== 'owner' && appRole !== 'tester') {
       return res.status(403).json({ message: 'Forbidden: Only owners or testers can change server settings.' });
     }
 
+    const userDoc = await db.collection('users').doc(userId).get();
+    const userData = userDoc.data();
     const serverInfo = userData?.guilds.find((g: any) => g.id === serverId);
 
     if (!serverInfo) {
@@ -97,13 +112,14 @@ router.put('/:serverId/password', protect, async (req: AuthRequest, res) => {
   }
 });
 
-
-// ★★★★★ ここからが修正箇所です ★★★★★
 router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
     const { password } = req.body;
     const userId = req.user.id;
+
+    // ★★★★★ 修正点 3: データベースではなく、認証トークンのロールを使用 ★★★★★
+    const appRole = req.user.role;
 
     const userDoc = await db.collection('users').doc(userId).get();
     if (!userDoc.exists) {
@@ -116,16 +132,11 @@ router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res)
       return res.status(403).json({ message: 'Forbidden: You are not a member of this server.' });
     }
 
-    // --- 新しい、より明確な権限チェックロジック ---
     const isDiscordAdmin = (BigInt(serverInfo.permissions) & BigInt(0x20)) === BigInt(0x20);
-    const appRole = userData?.subscriptionStatus;
 
-    // 条件1: オーナー（有料会員）かつDiscord管理者である
-    const hasOwnerRights = (appRole === 'active') && isDiscordAdmin;
-    // 条件2: テスターである（Discordの権限は問わない）
+    const hasOwnerRights = (appRole === 'owner') && isDiscordAdmin;
     const isAppTester = appRole === 'tester';
 
-    // オーナーまたはテスターであれば、パスワード不要で即時トークンを発行
     if (hasOwnerRights || isAppTester) {
       const writeToken = jwt.sign(
         { userId: userId, serverId: serverId, grant: 'write' },
@@ -134,14 +145,15 @@ router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res)
       return res.status(200).json({ writeToken });
     }
 
-    // --- 上記以外のユーザー（サポーターなど）のためのパスワード検証ロジック ---
     const serverDoc = await db.collection('servers').doc(serverId).get();
     const serverData = serverDoc.data();
 
-    // まず、サーバーにパスワードが設定されているかを確認する
     if (!serverData || !serverData.passwordHash) {
-      // 設定されていなければ、明確に「権限がない」とだけ伝える
-      return res.status(403).json({ message: 'Forbidden: You do not have sufficient permissions.' });
+      const writeToken = jwt.sign(
+        { userId: userId, serverId: serverId, grant: 'write' },
+        process.env.DISCORD_CLIENT_SECRET!, { expiresIn: '1h' }
+      );
+      return res.status(200).json({ writeToken });
     }
 
     if (typeof password !== 'string' || !password) {
@@ -164,6 +176,22 @@ router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res)
     res.status(500).json({ message: 'Failed to verify password' });
   }
 });
-// ★★★★★ ここまで ★★★★★
+
+// このエンドポイントは前の修正で追加したものです
+router.get('/:serverId/password-status', protect, async (req: AuthRequest, res) => {
+  try {
+    const { serverId } = req.params;
+    const serverRef = db.collection('servers').doc(serverId);
+    const serverDoc = await serverRef.get();
+
+    if (serverDoc.exists && serverDoc.data()?.passwordHash) {
+      res.status(200).json({ hasPassword: true });
+    } else {
+      res.status(200).json({ hasPassword: false });
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to check password status.' });
+  }
+});
 
 export default router;
