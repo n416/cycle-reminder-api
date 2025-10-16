@@ -5,7 +5,7 @@ import { Reminder } from './types';
 
 const remindersCollection = db.collection('reminders');
 const missedNotificationsCollection = db.collection('missedNotifications');
-const GRACE_PERIOD = 10 * 60 * 1000;
+const GRACE_PERIOD = 10 * 60 * 1000; // 10分
 
 const sanitizeMessage = (message: string): string => {
   return message
@@ -47,23 +47,33 @@ const calculateNextOccurrenceAfterSend = (reminder: Reminder, lastNotificationTi
   switch (reminder.recurrence.type) {
     case 'none':
       return null;
+
     case 'interval': {
-      let nextDate = new Date(lastNotificationTime);
-      nextDate.setHours(nextDate.getHours() + reminder.recurrence.hours);
-      return nextDate;
+      // 基準となる時刻（前回の通知時刻）のミリ秒表現を取得
+      const baseTimeMillis = lastNotificationTime.getTime();
+      // インターバル時間（時間単位）をミリ秒に変換
+      const intervalMillis = reminder.recurrence.hours * 60 * 60 * 1000;
+      // 次の通知時刻をミリ秒で計算し、新しいDateオブジェクトを返す
+      return new Date(baseTimeMillis + intervalMillis);
     }
     case 'weekly': {
       const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
       const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
       if (targetDaysOfWeek.size === 0) return null;
+
+      // 前回の通知日の翌日から検索を開始
       let nextDate = new Date(lastNotificationTime);
       nextDate.setDate(nextDate.getDate() + 1);
+
+      // 時刻を、ユーザーが最初に指定した時刻に固定する
       nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+
+      // 最大7日間ループして、次の該当日を探す
       for (let i = 0; i < 7; i++) {
         if (targetDaysOfWeek.has(nextDate.getDay())) {
-          return nextDate;
+          return nextDate; // 該当日が見つかったら、その日付を返す
         }
-        nextDate.setDate(nextDate.getDate() + 1);
+        nextDate.setDate(nextDate.getDate() + 1); // 次の日に移動
       }
       return null;
     }
