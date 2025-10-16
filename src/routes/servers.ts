@@ -54,7 +54,7 @@ router.put('/:serverId/password', protect, async (req: AuthRequest, res) => {
 
     const appRole = userData?.subscriptionStatus;
     if (appRole !== 'active' && appRole !== 'tester') {
-        return res.status(403).json({ message: 'Forbidden: Only owners or testers can change server settings.' });
+      return res.status(403).json({ message: 'Forbidden: Only owners or testers can change server settings.' });
     }
 
     const serverInfo = userData?.guilds.find((g: any) => g.id === serverId);
@@ -97,7 +97,8 @@ router.put('/:serverId/password', protect, async (req: AuthRequest, res) => {
   }
 });
 
-// ★★★★★ ここからがセキュリティー修正箇所です ★★★★★
+
+// ★★★★★ ここからが修正箇所です ★★★★★
 router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
@@ -108,20 +109,24 @@ router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res)
     if (!userDoc.exists) {
       return res.status(404).json({ message: 'User not found in our database.' });
     }
-    
+
     const userData = userDoc.data();
     const serverInfo = userData?.guilds.find((g: any) => g.id === serverId);
     if (!serverInfo) {
       return res.status(403).json({ message: 'Forbidden: You are not a member of this server.' });
     }
-    
-    // Discord上の管理者権限と、アプリ上の権限の両方を取得
+
+    // --- 新しい、より明確な権限チェックロジック ---
     const isDiscordAdmin = (BigInt(serverInfo.permissions) & BigInt(0x20)) === BigInt(0x20);
     const appRole = userData?.subscriptionStatus;
-    const hasAdminRights = isDiscordAdmin && (appRole === 'active' || appRole === 'tester');
 
-    // ケース1: Discord管理者かつアプリのオーナー/テスター => パスワード不要で即時トークン発行
-    if (hasAdminRights) {
+    // 条件1: オーナー（有料会員）かつDiscord管理者である
+    const hasOwnerRights = (appRole === 'active') && isDiscordAdmin;
+    // 条件2: テスターである（Discordの権限は問わない）
+    const isAppTester = appRole === 'tester';
+
+    // オーナーまたはテスターであれば、パスワード不要で即時トークンを発行
+    if (hasOwnerRights || isAppTester) {
       const writeToken = jwt.sign(
         { userId: userId, serverId: serverId, grant: 'write' },
         process.env.DISCORD_CLIENT_SECRET!, { expiresIn: '1h' }
@@ -129,27 +134,25 @@ router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res)
       return res.status(200).json({ writeToken });
     }
 
-    // ケース2: 上記以外（サポーターなど）=> パスワードの検証が必須
+    // --- 上記以外のユーザー（サポーターなど）のためのパスワード検証ロジック ---
     const serverDoc = await db.collection('servers').doc(serverId).get();
     const serverData = serverDoc.data();
 
-    // サーバーにパスワードが設定されていなければ、編集不可
+    // まず、サーバーにパスワードが設定されているかを確認する
     if (!serverData || !serverData.passwordHash) {
-      return res.status(403).json({ message: 'A password has not been set for this server.' });
+      // 設定されていなければ、明確に「権限がない」とだけ伝える
+      return res.status(403).json({ message: 'Forbidden: You do not have sufficient permissions.' });
     }
-    
-    // 送られてきたパスワードが空かチェック
+
     if (typeof password !== 'string' || !password) {
       return res.status(400).json({ message: 'Password is required.' });
     }
 
-    // パスワードを比較
     const isValid = await bcrypt.compare(password, serverData.passwordHash);
     if (!isValid) {
       return res.status(403).json({ message: 'Invalid password.' });
     }
 
-    // 検証成功、トークンを発行
     const writeToken = jwt.sign(
       { userId: userId, serverId: serverId, grant: 'write' },
       process.env.DISCORD_CLIENT_SECRET!, { expiresIn: '1h' }
@@ -162,6 +165,5 @@ router.post('/:serverId/verify-password', protect, async (req: AuthRequest, res)
   }
 });
 // ★★★★★ ここまで ★★★★★
-
 
 export default router;
