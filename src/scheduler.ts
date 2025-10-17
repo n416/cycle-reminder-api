@@ -2,10 +2,52 @@ import { db } from './config/firebase';
 import { client } from './index';
 import { TextChannel } from 'discord.js';
 import { Reminder } from './types';
+import ntpClient from 'ntp-client';
 
 const remindersCollection = db.collection('reminders');
 const missedNotificationsCollection = db.collection('missedNotifications');
 const GRACE_PERIOD = 10 * 60 * 1000; // 10分
+
+// サーバー時刻とNTP時刻の差（ミリ秒）を保持する変数
+let clockOffsetMs = 0;
+// 最後にNTPと同期した時刻（Unixタイムスタンプ）を保持する変数
+let lastSyncTime: number = 0;
+
+// 同期の条件を定義
+const SIX_HOURS_MS = 6 * 60 * 60 * 1000; // 6時間
+const FIVE_MINUTES_MS = 5 * 60 * 1000;   // 5分
+
+/**
+ * NTPサーバーに問い合わせ、サーバー時刻とのズレを計算して clockOffsetMs を更新する
+ */
+export const synchronizeClock = async () => {
+  try {
+    const ntpDate = await new Promise<Date>((resolve, reject) => {
+      // 信頼性の高いNISTのNTPサーバーを使用
+      ntpClient.getNetworkTime("time.nist.gov", 123, (err: Error | null, date: Date) => {
+        if (err) return reject(err);
+        resolve(date);
+      });
+    });
+    const localDate = new Date();
+    clockOffsetMs = ntpDate.getTime() - localDate.getTime();
+    // 最後に同期した時刻を記録
+    lastSyncTime = localDate.getTime();
+    console.log(`[Clock Sync] Time synchronized. Offset is ${clockOffsetMs}ms.`);
+  } catch (error) {
+    console.error("[Clock Sync] Failed to synchronize with NTP server:", error);
+    clockOffsetMs = 0;
+  }
+};
+
+/**
+ * 補正された現在時刻を取得する
+ * @returns {Date} サーバーのローカル時刻にオフセットを適用した、より正確な時刻
+ */
+const getCorrectedDate = (): Date => {
+  const localDate = new Date();
+  return new Date(localDate.getTime() + clockOffsetMs);
+};
 
 const sanitizeMessage = (message: string): string => {
   return message
@@ -49,11 +91,8 @@ const calculateNextOccurrenceAfterSend = (reminder: Reminder, lastNotificationTi
       return null;
 
     case 'interval': {
-      // 基準となる時刻（前回の通知時刻）のミリ秒表現を取得
       const baseTimeMillis = lastNotificationTime.getTime();
-      // インターバル時間（時間単位）をミリ秒に変換
       const intervalMillis = reminder.recurrence.hours * 60 * 60 * 1000;
-      // 次の通知時刻をミリ秒で計算し、新しいDateオブジェクトを返す
       return new Date(baseTimeMillis + intervalMillis);
     }
     case 'weekly': {
@@ -61,19 +100,15 @@ const calculateNextOccurrenceAfterSend = (reminder: Reminder, lastNotificationTi
       const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
       if (targetDaysOfWeek.size === 0) return null;
 
-      // 前回の通知日の翌日から検索を開始
       let nextDate = new Date(lastNotificationTime);
       nextDate.setDate(nextDate.getDate() + 1);
-
-      // 時刻を、ユーザーが最初に指定した時刻に固定する
       nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
 
-      // 最大7日間ループして、次の該当日を探す
       for (let i = 0; i < 7; i++) {
         if (targetDaysOfWeek.has(nextDate.getDay())) {
-          return nextDate; // 該当日が見つかったら、その日付を返す
+          return nextDate;
         }
-        nextDate.setDate(nextDate.getDate() + 1); // 次の日に移動
+        nextDate.setDate(nextDate.getDate() + 1);
       }
       return null;
     }
@@ -89,14 +124,47 @@ export const checkAndSendReminders = async () => {
     return;
   }
   isChecking = true;
-  // console.log(`[Scheduler] Checking for due reminders at ${new Date().toLocaleTimeString('ja-JP')}`);
-
-  const now = new Date();
 
   try {
+    const nowForSyncCheck = new Date();
+    let shouldSync = false;
+
+    // 条件1：最後の同期から6時間以上経過したか？
+    if (nowForSyncCheck.getTime() - lastSyncTime > SIX_HOURS_MS) {
+      console.log('[Clock Sync] Triggering sync due to long interval.');
+      shouldSync = true;
+    }
+
+    // 条件2：通知が5分以内に迫っているか？
+    if (!shouldSync) {
+      const nextReminderSnapshot = await remindersCollection
+        .where('status', '==', 'active')
+        .orderBy('nextNotificationTime', 'asc')
+        .limit(1)
+        .get();
+
+      if (!nextReminderSnapshot.empty) {
+        const nextReminder = nextReminderSnapshot.docs[0].data() as Reminder;
+        if (nextReminder.nextNotificationTime) {
+          const nextTime = (nextReminder.nextNotificationTime as any).toDate().getTime();
+          if (nextTime - nowForSyncCheck.getTime() < FIVE_MINUTES_MS) {
+            console.log('[Clock Sync] Triggering sync because a reminder is approaching.');
+            shouldSync = true;
+          }
+        }
+      }
+    }
+
+    // いずれかの条件を満たした場合のみ、NTPにアクセスする
+    if (shouldSync) {
+      await synchronizeClock();
+    }
+
+    // 補正された時刻を使って、本来の処理を行う
+    const correctedNow = getCorrectedDate();
     const snapshot = await remindersCollection
       .where('status', '==', 'active')
-      .where('nextNotificationTime', '<=', now)
+      .where('nextNotificationTime', '<=', correctedNow)
       .get();
 
     if (snapshot.empty) {
@@ -108,22 +176,22 @@ export const checkAndSendReminders = async () => {
 
     const promises = snapshot.docs.map(async (doc) => {
       const reminder = { id: doc.id, ...doc.data() } as Reminder;
-      
+
       if (!reminder.nextNotificationTime || typeof reminder.nextNotificationTime.toDate !== 'function') {
         console.error(`[Scheduler] Invalid nextNotificationTime for reminder ID: ${reminder.id}. Skipping and pausing.`);
         await doc.ref.update({ status: 'paused', nextNotificationTime: null });
         return;
       }
-      
+
       const notificationTime = reminder.nextNotificationTime.toDate();
-      
+
       if (isNaN(notificationTime.getTime())) {
-          console.error(`[Scheduler] Parsed date is invalid for reminder ID: ${reminder.id}. Skipping and pausing.`);
-          await doc.ref.update({ status: 'paused', nextNotificationTime: null });
-          return;
+        console.error(`[Scheduler] Parsed date is invalid for reminder ID: ${reminder.id}. Skipping and pausing.`);
+        await doc.ref.update({ status: 'paused', nextNotificationTime: null });
+        return;
       }
 
-      const missedBy = now.getTime() - notificationTime.getTime();
+      const missedBy = correctedNow.getTime() - notificationTime.getTime();
 
       if (missedBy < GRACE_PERIOD) {
         await sendMessage(reminder);

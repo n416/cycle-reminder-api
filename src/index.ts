@@ -6,7 +6,7 @@ import authRouter from './routes/auth';
 import remindersRouter from './routes/reminders';
 import serversRouter from './routes/servers';
 import logsRouter from './routes/logs';
-import { checkAndSendReminders } from './scheduler';
+import { checkAndSendReminders, synchronizeClock } from './scheduler';
 import paymentRouter from './routes/payment';
 import missedNotificationsRouter from './routes/missedNotifications';
 
@@ -38,7 +38,7 @@ app.use(cors(corsOptions));
 
 
 app.use(express.json({
-    verify: (req: Request & { rawBody?: Buffer }, _res, buf) => { // ★ 修正点: 'res' を '_res' に変更
+    verify: (req: Request & { rawBody?: Buffer }, _res, buf) => {
         if (req.originalUrl.startsWith('/api/payment/webhook')) {
             req.rawBody = buf;
         }
@@ -75,12 +75,25 @@ const startScheduler = () => {
 
 const main = async () => {
   try {
+    // アプリケーション起動時に、まず一度だけ時刻を同期する
+    await synchronizeClock();
+
     app.use('/api', (_req: Request, _res: Response, next: NextFunction) => {
       next();
     });
 
     app.get('/', (_req: Request, res: Response) => {
       res.send('Cycle Reminder API is running!');
+    });
+    
+    // 時刻確認用のエンドポイント
+    app.get('/api/time-check', (_req: Request, res: Response) => {
+      const serverTime = new Date();
+      res.status(200).json({
+        iso: serverTime.toISOString(),
+        locale: serverTime.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }),
+        message: "This is the current time on the server.",
+      });
     });
 
     app.use('/api/auth', authRouter);
