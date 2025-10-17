@@ -49,6 +49,7 @@ const calculateNextNotificationAfterSend = (
   reminder: Reminder
 ): { nextNotificationTime: Date | null; nextOffsetIndex: number | null } => {
 
+  // ★★★ 複雑な型判定をやめ、stringを直接Dateに変換 ★★★
   const startDate = new Date(reminder.startTime);
   if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null };
 
@@ -60,7 +61,7 @@ const calculateNextNotificationAfterSend = (
     const lastCycleTime = new Date((reminder.nextNotificationTime as any).toDate().getTime() + offsets[currentOffsetIndex] * 60 * 1000);
     const nextOffset = offsets[nextOffsetIndexInCycle];
     const nextNotificationTime = new Date(lastCycleTime.getTime() - nextOffset * 60 * 1000);
-    
+
     return {
       nextNotificationTime,
       nextOffsetIndex: nextOffsetIndexInCycle,
@@ -114,44 +115,83 @@ const calculateNextNotificationAfterSend = (
 
   const firstOffset = offsets[0];
   const nextNotificationTime = new Date(nextCycleTime.getTime() - firstOffset * 60 * 1000);
-  
+
   return {
     nextNotificationTime,
     nextOffsetIndex: 0,
   };
 };
 
-// ★★★★★ ここからが修正箇所です (sendMessage にデバッグログを追加) ★★★★★
-const sendMessage = async (reminder: Reminder) => {
-  // --- デバッグログ ---
-  console.log(`\n--- [SEND DEBUG] sendMessage が呼び出されました (ID: ${reminder.id}) ---`);
-
+const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
   try {
     const channel = await client.channels.fetch(reminder.channelId);
     if (channel && channel instanceof TextChannel) {
-      
-      const offsets = reminder.notificationOffsets || [0];
-      const currentOffset = offsets[reminder.nextOffsetIndex || 0];
-      console.log(`[SEND DEBUG] 1. DBから取得した生のメッセージ: "${reminder.message}"`);
-      console.log(`[SEND DEBUG] 2. 現在のオフセット値: ${currentOffset} 分前`);
 
       let finalMessage = sanitizeMessage(reminder.message);
-      console.log(`[SEND DEBUG] 3. sanitizeMessage後のメッセージ: "${finalMessage}"`);
-      
-      if (finalMessage.includes('{{offset}}')) {
-        console.log("[SEND DEBUG] 4. '{{offset}}' が見つかりました。置換処理を実行します。");
+
+      if (finalMessage.includes('{{all}}')) {
+        const twentyFourHoursLater = new Date(correctedNow.getTime() + 24 * 60 * 60 * 1000);
+
+        const snapshot = await remindersCollection
+          .where('serverId', '==', reminder.serverId)
+          .where('status', '==', 'active')
+          .where('nextNotificationTime', '>=', correctedNow)
+          .where('nextNotificationTime', '<=', twentyFourHoursLater)
+          .orderBy('nextNotificationTime', 'asc')
+          .get();
+
+        const upcomingNotifications = snapshot.docs
+          .map(doc => ({ id: doc.id, ...doc.data() } as Reminder))
+          .filter(r => r.id !== reminder.id);
+
+        const groupedByEvent = new Map<string, { message: string, time: Date, offsets: number[] }>();
+
+        for (const r of upcomingNotifications) {
+          const offsets = r.notificationOffsets || [0];
+          const currentOffset = offsets[r.nextOffsetIndex || 0];
+          const baseCycleTime = new Date((r.nextNotificationTime as any).toDate().getTime() + currentOffset * 60 * 1000);
+          const key = r.message + baseCycleTime.toISOString();
+
+          if (!groupedByEvent.has(key)) {
+            const allOffsets = (r.notificationOffsets || []).filter(offset => offset > 0);
+            groupedByEvent.set(key, {
+              message: r.message.split('\n')[0],
+              time: baseCycleTime,
+              offsets: allOffsets,
+            });
+          }
+        }
+
+        let scheduleList = "24時間以内に予定されているリマインダーはありません。";
+        const events = Array.from(groupedByEvent.values()).sort((a,b) => a.time.getTime() - b.time.getTime());
+
+        if (events.length > 0) {
+          scheduleList = events.map(event => {
+            const time = event.time.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+            let offsetLabel = '';
+            if (event.offsets.length > 0) {
+              const sortedOffsets = event.offsets.sort((a, b) => b - a);
+              offsetLabel = `【${sortedOffsets.join(',')}分前通知】`;
+            }
+            return `\`${time}\` - ${event.message}${offsetLabel}`;
+          }).join('\n');
+        }
+
+        finalMessage = finalMessage.replace('{{all}}', `\n**--- 24時間以内の予定 ---**\n${scheduleList}`);
+
+      } else if (finalMessage.includes('{{offset}}')) {
+        const offsets = reminder.notificationOffsets || [0];
+        const currentOffset = offsets[reminder.nextOffsetIndex || 0];
         if (currentOffset > 0) {
           finalMessage = finalMessage.replace('{{offset}}', `まであと ${currentOffset} 分`);
-          console.log(`[SEND DEBUG] 5a. (N分前) 置換後のメッセージ: "${finalMessage}"`);
         } else {
           finalMessage = finalMessage.replace('{{offset}}', 'の時間です！');
-          console.log(`[SEND DEBUG] 5b. (時間丁度) 置換後のメッセージ: "${finalMessage}"`);
         }
       } else {
-        console.log("[SEND DEBUG] 4. '{{offset}}' が見つかりませんでした。追記処理を実行します。");
+        const offsets = reminder.notificationOffsets || [0];
+        const currentOffset = offsets[reminder.nextOffsetIndex || 0];
         if (currentOffset > 0) {
           finalMessage += `\n（${currentOffset}分前）`;
-          console.log(`[SEND DEBUG] 5c. (追記) 後のメッセージ: "${finalMessage}"`);
         }
       }
 
@@ -167,14 +207,13 @@ const sendMessage = async (reminder: Reminder) => {
         }
       }
 
-      console.log(`[SEND DEBUG] 6. Discordに送信する最終的なメッセージ: "${finalMessage}"`);
       if (!finalMessage || !finalMessage.trim()) {
-          console.error("[SEND DEBUG] !!! エラー: 最終的なメッセージが空または空白です。送信を中止します。 !!!");
-          return; // 空メッセージの送信を防止
+        console.error(`[Scheduler] Error: Attempted to send an empty message for reminder ID ${reminder.id}. Aborting.`);
+        return;
       }
 
       const sentMessage = await channel.send(finalMessage);
-      console.log(`[SEND DEBUG] 7. メッセージは正常に送信されました。`);
+      console.log(`[Scheduler] Sent reminder "${reminder.message}" to #${channel.name}`);
 
       if (reminder.selectedEmojis && reminder.selectedEmojis.length > 0) {
         for (const emojiId of reminder.selectedEmojis) {
@@ -189,7 +228,7 @@ const sendMessage = async (reminder: Reminder) => {
       console.warn(`[Scheduler] Channel not found for reminder ID: ${reminder.id}`);
     }
   } catch (error) {
-    console.error(`[SEND DEBUG] !!! sendMessageの実行中にエラーが発生しました !!!`, error);
+    console.error(`[Scheduler] Failed to send message for reminder ${reminder.id}:`, error);
   }
 }
 
@@ -248,7 +287,7 @@ export const checkAndSendReminders = async () => {
       const missedBy = correctedNow.getTime() - notificationTime.getTime();
 
       if (missedBy < GRACE_PERIOD) {
-        await sendMessage(reminder);
+        await sendMessage(reminder, correctedNow);
       } else {
         console.warn(`[Scheduler] SKIPPED reminder "${reminder.message}" (too late by ${Math.round(missedBy / 60000)} mins)`);
         await missedNotificationsCollection.add({
@@ -263,20 +302,23 @@ export const checkAndSendReminders = async () => {
       const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationAfterSend(reminder);
 
       if (nextNotificationTime) {
+        // ★★★★★ ここからが修正箇所です ★★★★★
         const updateData: {
-          nextNotificationTime: Date;
+          nextNotificationTime: Date; // Timestamp
           nextOffsetIndex: number | null;
-          startTime?: string;
+          startTime?: string; // string
         } = {
           nextNotificationTime,
           nextOffsetIndex,
         };
-        
+
         if (reminder.recurrence.type === 'interval') {
+          // DateオブジェクトをISO文字列に変換して保存
           updateData.startTime = notificationTime.toISOString();
         }
 
         await doc.ref.update(updateData);
+        // ★★★★★ ここまで ★★★★★
 
       } else {
         await doc.ref.update({ status: 'paused', nextNotificationTime: null, nextOffsetIndex: null });

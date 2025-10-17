@@ -32,6 +32,7 @@ const calculateNextNotificationInfo = (
   baseTime: Date
 ): { nextNotificationTime: Date | null; nextOffsetIndex: number | null } => {
 
+  // ★★★ 複雑な型判定をやめ、stringを直接Dateに変換 ★★★
   const startDate = new Date(reminderData.startTime);
   if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null };
 
@@ -42,7 +43,7 @@ const calculateNextNotificationInfo = (
     case 'none':
       nextCycleTime = startDate >= baseTime ? startDate : null;
       break;
-    
+
     case 'daily': {
       let nextDate = baseTime > startDate ? new Date(baseTime) : new Date(startDate);
       nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
@@ -87,7 +88,7 @@ const calculateNextNotificationInfo = (
     default:
       nextCycleTime = null;
   }
-  
+
   // 次のサイクルが見つからなければ、通知も存在しない
   if (!nextCycleTime) {
     return { nextNotificationTime: null, nextOffsetIndex: null };
@@ -103,9 +104,9 @@ const calculateNextNotificationInfo = (
 
     // その通知時刻が「今」より後であれば、それが次に通知すべき時刻
     if (notificationTime > baseTime) {
-      return { 
-        nextNotificationTime: notificationTime, 
-        nextOffsetIndex: i 
+      return {
+        nextNotificationTime: notificationTime,
+        nextOffsetIndex: i
       };
     }
   }
@@ -160,7 +161,7 @@ router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) =
       ...dataWithOffsets,
       serverId: serverId,
       createdBy: req.user.id,
-      nextNotificationTime: nextNotificationTime,
+      nextNotificationTime: nextNotificationTime, // Timestamp
       nextOffsetIndex: nextOffsetIndex,
       selectedEmojis: reminderData.selectedEmojis || [],
     };
@@ -199,7 +200,7 @@ router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
     const offsets = (req.body.notificationOffsets || [0])
         .filter((n: number) => typeof n === 'number' && n >= 0)
         .sort((a: number, b: number) => b - a);
-    
+
     const updatedData = {
       ...req.body,
       notificationOffsets: offsets.length > 0 ? offsets : [0],
@@ -207,10 +208,10 @@ router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
     };
 
     const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(updatedData as any, new Date());
-    
-    await docRef.update({ 
-      ...updatedData, 
-      nextNotificationTime,
+
+    await docRef.update({
+      ...updatedData,
+      nextNotificationTime, // Timestamp
       nextOffsetIndex,
     });
 
