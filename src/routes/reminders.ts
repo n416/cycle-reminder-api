@@ -198,8 +198,8 @@ router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
 
     // オフセットをパースし、降順にソート
     const offsets = (req.body.notificationOffsets || [0])
-        .filter((n: number) => typeof n === 'number' && n >= 0)
-        .sort((a: number, b: number) => b - a);
+      .filter((n: number) => typeof n === 'number' && n >= 0)
+      .sort((a: number, b: number) => b - a);
 
     const updatedData = {
       ...req.body,
@@ -292,6 +292,80 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
   } catch (error) {
     console.error("Failed to send test message:", error);
     res.status(500).json({ error: 'Failed to send test message' });
+  }
+});
+
+/**
+ * 「24時間以内の予定」リマインダーを簡易作成するための専用エンドポイント
+ */
+router.post('/:serverId/daily-summary', protect, protectWrite, async (req: AuthRequest, res) => {
+  try {
+    const { serverId } = req.params;
+    const { channelId, time } = req.body;
+
+    if (!channelId || !time || !/^\d{2}:\d{2}$/.test(time)) {
+      return res.status(400).json({ error: 'channelId and time (HH:mm format) are required.' });
+    }
+
+    let channelName = '';
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (channel && channel instanceof TextChannel) {
+        channelName = channel.name;
+      } else {
+        return res.status(404).json({ error: 'Channel not found or is not a text channel.' });
+      }
+    } catch (e) {
+      console.error("Failed to fetch channel details:", e);
+      return res.status(404).json({ error: 'Channel not found.' });
+    }
+
+    const [hours, minutes] = time.split(':').map(Number);
+    const startTime = new Date();
+    startTime.setHours(hours, minutes, 0, 0);
+
+    // ★★★★★ ここからが修正箇所です ★★★★★
+    const reminderData = {
+      // serverId をこのオブジェクトに追加します
+      serverId: serverId,
+      message: '今日の予定\n{{all}}',
+      channel: channelName,
+      channelId: channelId,
+      startTime: startTime.toISOString(),
+      recurrence: { type: 'daily' as const },
+      status: 'active' as const,
+      notificationOffsets: [0],
+      selectedEmojis: [],
+      hideNextTime: false,
+    };
+
+    // これで calculateNextNotificationInfo に渡すオブジェクトに serverId が含まれます
+    const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(reminderData, new Date());
+
+    const newReminderData = {
+      ...reminderData,
+      // serverIdは↑で追加済みなので、ここではcreatedByを追加するだけでOK
+      createdBy: req.user.id,
+      nextNotificationTime: nextNotificationTime,
+      nextOffsetIndex: nextOffsetIndex,
+    };
+    // ★★★★★ ここまで ★★★★★
+
+    const docRef = await remindersCollection.add(newReminderData);
+    const result = { id: docRef.id, ...newReminderData };
+
+    await addLogWithTrim({
+      user: req.user.username,
+      action: '作成 (今日の予定)',
+      reminderMessage: result.message,
+      after: result,
+      serverId: serverId,
+    });
+
+    res.status(201).json(result);
+  } catch (error) {
+    console.error("Failed to create daily summary reminder:", error);
+    res.status(500).json({ error: 'Failed to create daily summary reminder' });
   }
 });
 
