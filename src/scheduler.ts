@@ -1,3 +1,4 @@
+/// <reference path="./types/ntp-client.d.ts" />
 import { db } from './config/firebase';
 import { client } from './index';
 import { TextChannel } from 'discord.js';
