@@ -39,6 +39,19 @@ const calculateNextOccurrence = (reminder: Omit<Reminder, 'id' | 'createdBy' | '
       }
       return nextDate;
     }
+    
+    case 'daily': {
+      // 検索開始日時（今 or 起点日）
+      let nextDate = baseTime > startDate ? new Date(baseTime) : new Date(startDate);
+      // 起点日の時刻をセット
+      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+
+      // もし今日の予定時刻がすでに過ぎていたら、明日へ
+      if (nextDate <= baseTime) {
+        nextDate.setDate(nextDate.getDate() + 1);
+      }
+      return nextDate;
+    }
 
     case 'weekly': {
       const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };

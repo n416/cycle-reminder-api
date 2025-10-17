@@ -113,9 +113,77 @@ router.get('/discord/callback', async (req: Request, res: Response) => {
     }
 });
 
+// ★★★★★ ここからが修正箇所です (GET /status) ★★★★★
 router.get('/status', protect, async (req: AuthRequest, res: Response) => {
-    const role = req.user.role || 'supporter';
-    res.status(200).json({ role });
+    
+    // --- デバッグログ ---
+    console.log("\n--- [AUTH DEBUG] /api/auth/status が呼び出されました (V2) ---");
+
+    try {
+        const userId = req.user.id;
+        const tokenRole = req.user.role; // ★ トークン（JWT）から role を取得
+        
+        console.log(`[AUTH DEBUG] 1. トークンから取得した User ID: ${userId}`);
+        console.log(`[AUTH DEBUG] 2. トークンに記録された Role: '${tokenRole}'`);
+
+        if (!userId) {
+            console.log("[AUTH DEBUG] -> User ID がないため 'supporter' で終了します。");
+            return res.status(401).json({ role: 'supporter' });
+        }
+
+        // 3. ログイン時の役割（トークンの役割）を最優先で確認
+        
+        // 3a. もし 'tester' としてログインしていたら、DBの状態に関わらず 'tester'
+        if (tokenRole === 'tester') {
+            console.log("[AUTH DEBUG] -> トークンロールが 'tester' のため、'tester' を返します。");
+            return res.status(200).json({ role: 'tester' });
+        }
+        
+        // 3b. もし 'supporter' としてログインしていたら、'supporter'
+        if (tokenRole === 'supporter') {
+            console.log("[AUTH DEBUG] -> トークンロールが 'supporter' のため、'supporter' を返します。");
+            return res.status(200).json({ role: 'supporter' });
+        }
+
+        // 3c. もし 'owner' としてログインしていた場合のみ、DBをチェックして降格判定
+        if (tokenRole === 'owner') {
+            console.log("[AUTH DEBUG] 4. トークンロールが 'owner' のため、DBで有効期限を検証します...");
+            const userRef = db.collection('users').doc(userId);
+            const userDoc = await userRef.get();
+
+            if (!userDoc.exists) {
+                console.log("[AUTH DEBUG] -> 'owner' トークンだがDBに実体がないため 'supporter' に降格します。");
+                return res.status(200).json({ role: 'supporter' });
+            }
+
+            const userData = userDoc.data();
+            const status = userData?.subscriptionStatus;
+            const expiresAt = userData?.expiresAt;
+            console.log(`[AUTH DEBUG] 5. DB Status: '${status}', ExpiresAt: '${expiresAt}'`);
+
+            if (status === 'active') {
+                if (expiresAt && new Date(expiresAt) < new Date()) {
+                    console.log("[AUTH DEBUG] -> 'active' ですが期限切れのため 'supporter' に降格します。");
+                    return res.status(200).json({ role: 'supporter' }); // 期限切れ
+                } else {
+                    console.log("[AUTH DEBUG] -> 'active' (有効) のため 'owner' を維持します。");
+                    return res.status(200).json({ role: 'owner' }); // 有効
+                }
+            } else {
+                console.log(`[AUTH DEBUG] -> DB Status が 'active' ではないため 'supporter' に降格します。`);
+                return res.status(200).json({ role: 'supporter' });
+            }
+        }
+
+        // 4. 'unknown' またはその他のロールがトークンにあった場合
+        console.log(`[AUTH DEBUG] -> 不明なトークンロール ('${tokenRole}') のため 'supporter' を返します。`);
+        res.status(200).json({ role: 'supporter' });
+
+    } catch (error) {
+        console.error("[AUTH DEBUG] !!! エラーが発生しました !!!", error);
+        res.status(500).json({ error: 'Failed to fetch status' });
+    }
 });
+// ★★★★★ ここまで ★★★★★
 
 export default router;

@@ -1,7 +1,8 @@
 type RecurrenceRule =
   | { type: 'none' }
   | { type: 'weekly'; days: string[] }
-  | { type: 'interval'; hours: number };
+  | { type: 'interval'; hours: number }
+  | { type: 'daily' };
 
 export interface Reminder {
   id: string;

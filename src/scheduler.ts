@@ -67,8 +67,12 @@ const sendMessage = async (reminder: Reminder) => {
       // hideNextTimeフラグがtrueでない場合、次の通知日時を計算して追記する
       // (フラグがない古いリマインダーはデフォルトで日時を表示する)
       if (reminder.hideNextTime !== true) {
-        const currentNotificationTime = (reminder.nextNotificationTime as any).toDate();
-        const nextOccurrence = calculateNextOccurrenceAfterSend(reminder, currentNotificationTime);
+
+        // ★★★ 修正箇所 ★★★
+        // 次の通知時刻を計算するために「今」の時刻が必要
+        const correctedNow = getCorrectedDate();
+        const nextOccurrence = calculateNextOccurrenceAfterSend(reminder, (reminder.nextNotificationTime as any).toDate(), correctedNow);
+        // ★★★ ここまで ★★★
 
         if (nextOccurrence) {
           // "2025年10月18日 土曜日 12:20" の形式にフォーマット
@@ -107,7 +111,9 @@ const sendMessage = async (reminder: Reminder) => {
   }
 }
 
-const calculateNextOccurrenceAfterSend = (reminder: Reminder, lastNotificationTime: Date): Date | null => {
+// ★★★ 修正箇所 (シグネチャに correctedNow: Date を追加) ★★★
+const calculateNextOccurrenceAfterSend = (reminder: Reminder, lastNotificationTime: Date, correctedNow: Date): Date | null => {
+  // ★ 起点日(startTime)をアンカー（基準）として使用する
   const startDate = new Date(reminder.startTime);
   if (isNaN(startDate.getTime())) return null;
 
@@ -116,17 +122,41 @@ const calculateNextOccurrenceAfterSend = (reminder: Reminder, lastNotificationTi
       return null;
 
     case 'interval': {
-      const baseTimeMillis = lastNotificationTime.getTime();
-      const intervalMillis = reminder.recurrence.hours * 60 * 60 * 1000;
-      return new Date(baseTimeMillis + intervalMillis);
+      // ★★★ 修正箇所 (カスケード問題の修正) ★★★
+      //「今」(correctedNow) の時刻を基準に、
+      //「起点日」(startDate) から「間隔」(intervalHours) を足していき、
+      //「今」を超える次の実行時刻スロットを探す
+
+      let nextDate = new Date(startDate);
+      const intervalHours = reminder.recurrence.hours;
+
+      //「今」を超えるまでループ
+      while (nextDate <= correctedNow) {
+        nextDate.setHours(nextDate.getHours() + intervalHours);
+      }
+      return nextDate;
+      // ★★★ ここまで ★★★
     }
+
+    case 'daily': {
+      // 最後に実行されるはずだった時刻 (lastNotificationTime) を基準
+      let nextDate = new Date(lastNotificationTime);
+      // 翌日に設定
+      nextDate.setDate(nextDate.getDate() + 1);
+      // 時刻は「起点日」のものを利用
+      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+      return nextDate;
+    }
+
     case 'weekly': {
       const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
       const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
       if (targetDaysOfWeek.size === 0) return null;
 
+      // 週次の場合は、最後に実行されるはずだった時刻 (lastNotificationTime) を基準に次を探す
       let nextDate = new Date(lastNotificationTime);
       nextDate.setDate(nextDate.getDate() + 1);
+      // 時刻は「起点日」のものを利用
       nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
 
       for (let i = 0; i < 7; i++) {
@@ -239,10 +269,23 @@ export const checkAndSendReminders = async () => {
         }
       }
 
-      const nextTime = calculateNextOccurrenceAfterSend(reminder, notificationTime);
+      // ★★★ 修正箇所 (correctedNow を渡す) ★★★
+      const nextTime = calculateNextOccurrenceAfterSend(reminder, notificationTime, correctedNow);
 
       if (nextTime) {
-        await doc.ref.update({ nextNotificationTime: nextTime });
+        // ★★★ 修正箇所 ★★★
+        // ご提案の「起点日を移動させる」処理
+        // interval の場合、起点日(startTime)も「実行されるはずだった時刻」に更新し、
+        // 次の編集時に備える
+        if (reminder.recurrence.type === 'interval') {
+          await doc.ref.update({
+            nextNotificationTime: nextTime,
+            startTime: notificationTime // ★ 起点日を、実行された（or スキップされた）「予定時刻」に更新
+          });
+        } else {
+          await doc.ref.update({ nextNotificationTime: nextTime });
+        }
+        // ★★★ ここまで ★★★
       } else {
         await doc.ref.update({ status: 'paused', nextNotificationTime: null });
       }
