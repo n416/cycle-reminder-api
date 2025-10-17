@@ -21,69 +21,100 @@ const addLogWithTrim = async (logData: object) => {
   }
 };
 
-// ★★★★★ ここからが修正箇所です ★★★★★
-const calculateNextOccurrence = (reminder: Omit<Reminder, 'id' | 'createdBy' | 'channel' | 'message' | 'status'>, baseTime: Date): Date | null => {
-  const startDate = new Date(reminder.startTime);
-  if (isNaN(startDate.getTime())) return null;
+/**
+ * 次に実行すべき通知の情報を計算する
+ * @param reminderData リマインダーのデータ
+ * @param baseTime 計算の基準となる現在時刻
+ * @returns { { nextNotificationTime: Date | null, nextOffsetIndex: number | null } } 次の通知時刻と、そのオフセットのインデックス
+ */
+const calculateNextNotificationInfo = (
+  reminderData: Omit<Reminder, 'id' | 'createdBy' | 'channel' | 'message' | 'status'>,
+  baseTime: Date
+): { nextNotificationTime: Date | null; nextOffsetIndex: number | null } => {
 
-  switch (reminder.recurrence.type) {
+  const startDate = new Date(reminderData.startTime);
+  if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null };
+
+  // --- 1. 次の「本来の実行時刻」（サイクルの起点）を計算する ---
+  let nextCycleTime: Date | null = null; // ★★★ 初期値を null に設定 ★★★
+
+  switch (reminderData.recurrence.type) {
     case 'none':
-      // 基準時刻より後であれば、その日時を返す
-      return startDate >= baseTime ? startDate : null;
-
-    case 'interval': {
-      // 基準時刻を越えるまで、開始時刻から間隔を足し続ける
-      let nextDate = new Date(startDate);
-      while (nextDate <= baseTime) {
-        nextDate.setHours(nextDate.getHours() + reminder.recurrence.hours);
-      }
-      return nextDate;
-    }
+      nextCycleTime = startDate >= baseTime ? startDate : null;
+      break;
     
     case 'daily': {
-      // 検索開始日時（今 or 起点日）
       let nextDate = baseTime > startDate ? new Date(baseTime) : new Date(startDate);
-      // 起点日の時刻をセット
       nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
-
-      // もし今日の予定時刻がすでに過ぎていたら、明日へ
       if (nextDate <= baseTime) {
         nextDate.setDate(nextDate.getDate() + 1);
       }
-      return nextDate;
+      nextCycleTime = nextDate;
+      break;
+    }
+
+    case 'interval': {
+      let nextDate = new Date(startDate);
+      while (nextDate <= baseTime) {
+        nextDate.setHours(nextDate.getHours() + reminderData.recurrence.hours);
+      }
+      nextCycleTime = nextDate;
+      break;
     }
 
     case 'weekly': {
       const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
-      const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
-
-      if (targetDaysOfWeek.size === 0) return null;
-
-      // 検索開始日時を設定（基準時刻より過去にはならないように）
+      const targetDaysOfWeek = new Set(reminderData.recurrence.days.map(day => dayMap[day]));
+      if (targetDaysOfWeek.size === 0) {
+        nextCycleTime = null;
+        break;
+      }
       let nextDate = baseTime > startDate ? new Date(baseTime) : new Date(startDate);
-
-      // ユーザーが指定した「時刻」をnextDateにセットする
       nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
-
-      // もし計算した今日の予定時刻がすでに過ぎていたら、検索開始を明日にする
       if (nextDate <= baseTime) {
         nextDate.setDate(nextDate.getDate() + 1);
       }
-
-      // 最大7日間（1週間）ループして、次の該当日を探す
       for (let i = 0; i < 7; i++) {
         if (targetDaysOfWeek.has(nextDate.getDay())) {
-          // 該当日が見つかったので、その日付を返す
-          return nextDate;
+          nextCycleTime = nextDate;
+          break; // 見つかったらループを抜ける
         }
-        // 次の日に移動
         nextDate.setDate(nextDate.getDate() + 1);
       }
-      // 1週間探しても見つからなかった（＝曜日が指定されていないなど）
-      return null;
+      // ★ ループ後に nextCycleTime が null のままなら何もしない (初期値のまま)
+      break;
+    }
+    default:
+      nextCycleTime = null;
+  }
+  
+  // 次のサイクルが見つからなければ、通知も存在しない
+  if (!nextCycleTime) {
+    return { nextNotificationTime: null, nextOffsetIndex: null };
+  }
+
+  // --- 2. オフセットを適用して、実際に通知すべき時刻を探す ---
+  const offsets = reminderData.notificationOffsets || [0]; // オフセットがなければ [0] (時間丁度) とみなす
+
+  // 複数のオフセットの中から、「今」以降で一番近い（最初に来る）通知を探す
+  for (let i = 0; i < offsets.length; i++) {
+    const offsetMinutes = offsets[i];
+    const notificationTime = new Date(nextCycleTime.getTime() - offsetMinutes * 60 * 1000);
+
+    // その通知時刻が「今」より後であれば、それが次に通知すべき時刻
+    if (notificationTime > baseTime) {
+      return { 
+        nextNotificationTime: notificationTime, 
+        nextOffsetIndex: i 
+      };
     }
   }
-  return null;
+
+  // 「今」を過ぎていないオフセット通知が一つもなかった場合
+  // (例: 12:30のボスに対し、[10, 5]オフセットを設定していて、現在時刻が12:28の場合)
+  // → このサイクルの通知はすべて終わっているので、次のサイクルの最初の通知を探す必要がある
+  // (この処理はスケジューラー側で行うので、ここでは null を返す)
+  return { nextNotificationTime: null, nextOffsetIndex: null };
 };
 // ★★★★★ ここまで ★★★★★
 
@@ -107,17 +138,30 @@ router.get('/:serverId', protect, async (req: AuthRequest, res) => {
   }
 });
 
+// ★★★★★ POST /:serverId の修正 ★★★★★
 router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
     const { userId, ...reminderData } = req.body;
 
-    const nextNotificationTime = calculateNextOccurrence(reminderData as any, new Date());
-    const newReminderData = {
+    // オフセットをパースし、降順にソート
+    const offsets = (reminderData.notificationOffsets || [0])
+      .filter((n: number) => typeof n === 'number' && n >= 0)
+      .sort((a: number, b: number) => b - a);
+
+    const dataWithOffsets = {
       ...reminderData,
+      notificationOffsets: offsets.length > 0 ? offsets : [0], // 空の場合は[0]を保証
+    };
+
+    const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(dataWithOffsets as any, new Date());
+
+    const newReminderData = {
+      ...dataWithOffsets,
       serverId: serverId,
       createdBy: req.user.id,
       nextNotificationTime: nextNotificationTime,
+      nextOffsetIndex: nextOffsetIndex,
       selectedEmojis: reminderData.selectedEmojis || [],
     };
 
@@ -139,13 +183,10 @@ router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) =
   }
 });
 
+// ★★★★★ PUT /:id の修正 ★★★★★
 router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
-    const updatedData = {
-      ...req.body,
-      selectedEmojis: req.body.selectedEmojis || [],
-    };
     const docRef = remindersCollection.doc(id);
     const beforeSnap = await docRef.get();
     const beforeData = beforeSnap.data();
@@ -154,24 +195,41 @@ router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Reminder not found." });
     }
 
-    const nextNotificationTime = calculateNextOccurrence(updatedData as any, new Date());
-    await docRef.update({ ...updatedData, nextNotificationTime });
+    // オフセットをパースし、降順にソート
+    const offsets = (req.body.notificationOffsets || [0])
+        .filter((n: number) => typeof n === 'number' && n >= 0)
+        .sort((a: number, b: number) => b - a);
+    
+    const updatedData = {
+      ...req.body,
+      notificationOffsets: offsets.length > 0 ? offsets : [0],
+      selectedEmojis: req.body.selectedEmojis || [],
+    };
+
+    const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(updatedData as any, new Date());
+    
+    await docRef.update({ 
+      ...updatedData, 
+      nextNotificationTime,
+      nextOffsetIndex,
+    });
 
     await addLogWithTrim({
       user: req.user.username,
       action: '更新',
       reminderMessage: updatedData.message,
       before: { id, ...beforeData },
-      after: { id, ...updatedData },
+      after: { id, ...updatedData, nextNotificationTime, nextOffsetIndex },
       serverId: beforeData.serverId,
     });
 
-    res.status(200).json({ id, ...updatedData, nextNotificationTime });
+    res.status(200).json({ id, ...updatedData, nextNotificationTime, nextOffsetIndex });
   } catch (error) {
     console.error("Failed to update reminder:", error);
     res.status(500).json({ error: 'Failed to update reminder' });
   }
 });
+
 
 router.delete('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
