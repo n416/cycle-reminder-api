@@ -62,8 +62,32 @@ const sendMessage = async (reminder: Reminder) => {
   try {
     const channel = await client.channels.fetch(reminder.channelId);
     if (channel && channel instanceof TextChannel) {
-      const safeMessage = sanitizeMessage(reminder.message);
-      const sentMessage = await channel.send(safeMessage);
+      let finalMessage = sanitizeMessage(reminder.message);
+
+      // hideNextTimeフラグがtrueでない場合、次の通知日時を計算して追記する
+      // (フラグがない古いリマインダーはデフォルトで日時を表示する)
+      if (reminder.hideNextTime !== true) {
+        const currentNotificationTime = (reminder.nextNotificationTime as any).toDate();
+        const nextOccurrence = calculateNextOccurrenceAfterSend(reminder, currentNotificationTime);
+
+        if (nextOccurrence) {
+          // "2025年10月18日 土曜日 12:20" の形式にフォーマット
+          const formatter = new Intl.DateTimeFormat('ja-JP', {
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+            weekday: 'long',
+            hour: '2-digit',
+            minute: '2-digit',
+            timeZone: 'Asia/Tokyo'
+          });
+          const formattedDate = formatter.format(nextOccurrence);
+
+          finalMessage += `\n\nリマインド予定日時: ${formattedDate}`;
+        }
+      }
+
+      const sentMessage = await channel.send(finalMessage);
       console.log(`[Scheduler] Sent reminder "${reminder.message}" to #${channel.name}`);
 
       if (reminder.selectedEmojis && reminder.selectedEmojis.length > 0) {

@@ -15,6 +15,7 @@ export interface Reminder {
   createdBy: string;
   nextNotificationTime?: any;
   selectedEmojis?: string[];
+  hideNextTime?: boolean;
 }
 
 // --- ★★★ ここから追加 ★★★ ---
