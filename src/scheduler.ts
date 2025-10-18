@@ -139,10 +139,11 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
           .where('nextNotificationTime', '<=', twentyFourHoursLater)
           .orderBy('nextNotificationTime', 'asc')
           .get();
+
         const upcomingNotifications = snapshot.docs
           .map(doc => ({ id: doc.id, ...doc.data() } as Reminder))
-          // 自分自身と、他の {{all}} を含むリマインダーを除外する
           .filter(r => r.id !== reminder.id && !r.message.includes('{{all}}'));
+
         const groupedByEvent = new Map<string, { message: string, time: Date, offsets: number[] }>();
 
         for (const r of upcomingNotifications) {
@@ -194,8 +195,17 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
         }
       }
 
-      if (reminder.hideNextTime !== true) {
-        const { nextNotificationTime: nextTimeForDisplay } = calculateNextNotificationAfterSend(reminder);
+      // ★★★★★ ここからが修正箇所です ★★★★★
+      const offsets = reminder.notificationOffsets || [0];
+      const currentOffset = offsets[reminder.nextOffsetIndex || 0];
+
+      // 予備通知か本通知（オフセット0）かを明確に判断
+      const isMainNotification = currentOffset === 0;
+
+      // 本通知であり、かつ「隠す」設定になっていない場合にのみ、「次の通知」文字列を追加する
+      if (isMainNotification && reminder.hideNextTime !== true) {
+        // 表示用の関数を呼び出し、次の「サイクル」の時刻を取得
+        const nextTimeForDisplay = calculateNextCycleStartTimeForDisplay(reminder);
         if (nextTimeForDisplay) {
           const formatter = new Intl.DateTimeFormat('ja-JP', {
             year: 'numeric', month: 'long', day: 'numeric', weekday: 'long',
@@ -205,6 +215,7 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
           finalMessage += `\n\n次の通知: ${formattedDate}`;
         }
       }
+      // ★★★★★ ここまで ★★★★★
 
       if (!finalMessage || !finalMessage.trim()) {
         console.error(`[Scheduler] Error: Attempted to send an empty message for reminder ID ${reminder.id}. Aborting.`);
@@ -230,6 +241,69 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
     console.error(`[Scheduler] Failed to send message for reminder ${reminder.id}:`, error);
   }
 }
+
+/**
+ * 【表示用】次のサイクルの最初の通知時刻を計算する
+ */
+const calculateNextCycleStartTimeForDisplay = (reminder: Reminder): Date | null => {
+  const startDate = new Date(reminder.startTime);
+  if (isNaN(startDate.getTime())) return null;
+
+  const offsets = reminder.notificationOffsets || [0];
+  const currentOffsetIndex = reminder.nextOffsetIndex || 0;
+
+  // 現在トリガーされている通知のサイクル基点時刻を計算する
+  const currentCycleBaseTime = new Date((reminder.nextNotificationTime as any).toDate().getTime() + offsets[currentOffsetIndex] * 60 * 1000);
+
+  let nextCycleStartTime: Date | null = null;
+
+  switch (reminder.recurrence.type) {
+    case 'none':
+      return null;
+
+    case 'daily': {
+      let nextDate = new Date(currentCycleBaseTime);
+      nextDate.setDate(nextDate.getDate() + 1);
+      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+      nextCycleStartTime = nextDate;
+      break;
+    }
+
+    case 'interval': {
+      let nextDate = new Date(currentCycleBaseTime);
+      nextDate.setHours(nextDate.getHours() + reminder.recurrence.hours);
+      nextCycleStartTime = nextDate;
+      break;
+    }
+
+    case 'weekly': {
+      const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+      const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
+      if (targetDaysOfWeek.size === 0) return null;
+
+      let nextDate = new Date(currentCycleBaseTime);
+      nextDate.setDate(nextDate.getDate() + 1);
+      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+
+      for (let i = 0; i < 7; i++) {
+        if (targetDaysOfWeek.has(nextDate.getDay())) {
+          nextCycleStartTime = nextDate;
+          break;
+        }
+        nextDate.setDate(nextDate.getDate() + 1);
+      }
+      break;
+    }
+  }
+
+  // 次のサイクルが見つかった場合、その最初のオフセットを適用した時刻を返す
+  if (nextCycleStartTime) {
+    const firstOffset = offsets[0] || 0;
+    return new Date(nextCycleStartTime.getTime() - firstOffset * 60 * 1000);
+  }
+
+  return null;
+};
 
 let isChecking = false;
 
