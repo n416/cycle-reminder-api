@@ -12,7 +12,7 @@ export interface Reminder {
   channelId: string;
   startTime: string; // ★★★ anyからstringに修正 ★★★
   recurrence: RecurrenceRule;
-  status: 'active' | 'paused';
+  status: 'active' | 'paused' | 'processing';
   createdBy: string;
   nextNotificationTime?: any; // 次に通知すべき「オフセット適用後」の絶対時刻
   selectedEmojis?: string[];

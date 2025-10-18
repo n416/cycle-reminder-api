@@ -45,22 +45,91 @@ const sanitizeMessage = (message: string): string => {
     .replace(/<@!?(\d+)>/g, '＠ユーザー');
 };
 
+
+/**
+ * 【表示用】次のサイクルの最初の通知時刻を計算する
+ */
+const calculateNextCycleStartTimeForDisplay = (reminder: Reminder): Date | null => {
+  const startDate = new Date(reminder.startTime);
+  if (isNaN(startDate.getTime())) return null;
+
+  const offsets = reminder.notificationOffsets || [0];
+  const currentOffsetIndex = reminder.nextOffsetIndex || 0;
+
+  // 現在トリガーされている通知のサイクル基点時刻を計算する
+  const currentCycleBaseTime = new Date((reminder.nextNotificationTime as any).toDate().getTime() + offsets[currentOffsetIndex] * 60 * 1000);
+
+  let nextCycleStartTime: Date | null = null;
+
+  switch (reminder.recurrence.type) {
+    case 'none':
+      return null;
+
+    case 'daily': {
+      let nextDate = new Date(currentCycleBaseTime);
+      nextDate.setDate(nextDate.getDate() + 1);
+      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+      nextCycleStartTime = nextDate;
+      break;
+    }
+
+    case 'interval': {
+      let nextDate = new Date(currentCycleBaseTime);
+      nextDate.setHours(nextDate.getHours() + reminder.recurrence.hours);
+      nextCycleStartTime = nextDate;
+      break;
+    }
+
+    case 'weekly': {
+      const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+      const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
+      if (targetDaysOfWeek.size === 0) return null;
+
+      let nextDate = new Date(currentCycleBaseTime);
+      nextDate.setDate(nextDate.getDate() + 1);
+      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+
+      for (let i = 0; i < 7; i++) {
+        if (targetDaysOfWeek.has(nextDate.getDay())) {
+          nextCycleStartTime = nextDate;
+          break;
+        }
+        nextDate.setDate(nextDate.getDate() + 1);
+      }
+      break;
+    }
+  }
+
+  // 次のサイクルが見つかった場合、その最初のオフセットを適用した時刻を返す
+  if (nextCycleStartTime) {
+    const firstOffset = offsets[0] || 0;
+    return new Date(nextCycleStartTime.getTime() - firstOffset * 60 * 1000);
+  }
+
+  return null;
+};
+
+
+/**
+ * 【スケジューラー用】次にDBに保存すべき通知情報を計算する
+ */
 const calculateNextNotificationAfterSend = (
   reminder: Reminder
 ): { nextNotificationTime: Date | null; nextOffsetIndex: number | null } => {
 
-  // ★★★ 複雑な型判定をやめ、stringを直接Dateに変換 ★★★
   const startDate = new Date(reminder.startTime);
   if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null };
 
   const offsets = reminder.notificationOffsets || [0];
   const currentOffsetIndex = reminder.nextOffsetIndex || 0;
 
+  // --- 同じサイクル内で、次のオフセット通知があるかチェック ---
   const nextOffsetIndexInCycle = currentOffsetIndex + 1;
   if (nextOffsetIndexInCycle < offsets.length) {
-    const lastCycleTime = new Date((reminder.nextNotificationTime as any).toDate().getTime() + offsets[currentOffsetIndex] * 60 * 1000);
+    // 現在の通知のサイクル基点時刻を計算
+    const currentCycleBaseTime = new Date((reminder.nextNotificationTime as any).toDate().getTime() + offsets[currentOffsetIndex] * 60 * 1000);
     const nextOffset = offsets[nextOffsetIndexInCycle];
-    const nextNotificationTime = new Date(lastCycleTime.getTime() - nextOffset * 60 * 1000);
+    const nextNotificationTime = new Date(currentCycleBaseTime.getTime() - nextOffset * 60 * 1000);
 
     return {
       nextNotificationTime,
@@ -68,6 +137,7 @@ const calculateNextNotificationAfterSend = (
     };
   }
 
+  // --- 次のサイクルの最初の通知を計算 ---
   let nextCycleTime: Date | null = null;
   const lastCycleTime = new Date((reminder.nextNotificationTime as any).toDate().getTime() + offsets[currentOffsetIndex] * 60 * 1000);
 
@@ -167,7 +237,11 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
 
         if (events.length > 0) {
           scheduleList = events.map(event => {
-            const time = event.time.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
+            const time = event.time.toLocaleTimeString('ja-JP', {
+              hour: '2-digit',
+              minute: '2-digit',
+              timeZone: 'Asia/Tokyo'
+            });
             let offsetLabel = '';
             if (event.offsets.length > 0) {
               const sortedOffsets = event.offsets.sort((a, b) => b - a);
@@ -195,16 +269,12 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
         }
       }
 
-      // ★★★★★ ここからが修正箇所です ★★★★★
       const offsets = reminder.notificationOffsets || [0];
       const currentOffset = offsets[reminder.nextOffsetIndex || 0];
 
-      // 予備通知か本通知（オフセット0）かを明確に判断
       const isMainNotification = currentOffset === 0;
 
-      // 本通知であり、かつ「隠す」設定になっていない場合にのみ、「次の通知」文字列を追加する
       if (isMainNotification && reminder.hideNextTime !== true) {
-        // 表示用の関数を呼び出し、次の「サイクル」の時刻を取得
         const nextTimeForDisplay = calculateNextCycleStartTimeForDisplay(reminder);
         if (nextTimeForDisplay) {
           const formatter = new Intl.DateTimeFormat('ja-JP', {
@@ -215,7 +285,6 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
           finalMessage += `\n\n次の通知: ${formattedDate}`;
         }
       }
-      // ★★★★★ ここまで ★★★★★
 
       if (!finalMessage || !finalMessage.trim()) {
         console.error(`[Scheduler] Error: Attempted to send an empty message for reminder ID ${reminder.id}. Aborting.`);
@@ -242,68 +311,6 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
   }
 }
 
-/**
- * 【表示用】次のサイクルの最初の通知時刻を計算する
- */
-const calculateNextCycleStartTimeForDisplay = (reminder: Reminder): Date | null => {
-  const startDate = new Date(reminder.startTime);
-  if (isNaN(startDate.getTime())) return null;
-
-  const offsets = reminder.notificationOffsets || [0];
-  const currentOffsetIndex = reminder.nextOffsetIndex || 0;
-
-  // 現在トリガーされている通知のサイクル基点時刻を計算する
-  const currentCycleBaseTime = new Date((reminder.nextNotificationTime as any).toDate().getTime() + offsets[currentOffsetIndex] * 60 * 1000);
-
-  let nextCycleStartTime: Date | null = null;
-
-  switch (reminder.recurrence.type) {
-    case 'none':
-      return null;
-
-    case 'daily': {
-      let nextDate = new Date(currentCycleBaseTime);
-      nextDate.setDate(nextDate.getDate() + 1);
-      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
-      nextCycleStartTime = nextDate;
-      break;
-    }
-
-    case 'interval': {
-      let nextDate = new Date(currentCycleBaseTime);
-      nextDate.setHours(nextDate.getHours() + reminder.recurrence.hours);
-      nextCycleStartTime = nextDate;
-      break;
-    }
-
-    case 'weekly': {
-      const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
-      const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
-      if (targetDaysOfWeek.size === 0) return null;
-
-      let nextDate = new Date(currentCycleBaseTime);
-      nextDate.setDate(nextDate.getDate() + 1);
-      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
-
-      for (let i = 0; i < 7; i++) {
-        if (targetDaysOfWeek.has(nextDate.getDay())) {
-          nextCycleStartTime = nextDate;
-          break;
-        }
-        nextDate.setDate(nextDate.getDate() + 1);
-      }
-      break;
-    }
-  }
-
-  // 次のサイクルが見つかった場合、その最初のオフセットを適用した時刻を返す
-  if (nextCycleStartTime) {
-    const firstOffset = offsets[0] || 0;
-    return new Date(nextCycleStartTime.getTime() - firstOffset * 60 * 1000);
-  }
-
-  return null;
-};
 
 let isChecking = false;
 
@@ -354,15 +361,40 @@ export const checkAndSendReminders = async () => {
 
     console.log(`[Scheduler] Found ${snapshot.size} due reminder(s).`);
 
-    const promises = snapshot.docs.map(async (doc) => {
-      const reminder = { id: doc.id, ...doc.data() } as Reminder;
+    for (const doc of snapshot.docs) {
+      const reminderId = doc.id;
+      const reminderRef = remindersCollection.doc(reminderId);
+
+      try {
+        await db.runTransaction(async (transaction) => {
+          const freshDoc = await transaction.get(reminderRef);
+          if (!freshDoc.exists) return;
+
+          const reminderData = freshDoc.data() as Reminder;
+
+          if (reminderData.status !== 'active') {
+            console.log(`[Scheduler] Reminder ${reminderId} is already being processed or is paused. Skipping.`);
+            return;
+          }
+
+          transaction.update(reminderRef, { status: 'processing' });
+        });
+      } catch (error) {
+        console.warn(`[Scheduler] Race condition detected for reminder ${reminderId}. Another instance won. Skipping.`);
+        continue;
+      }
+
+      console.log(`[Scheduler] Acquired lock for reminder ${reminderId}.`);
+
+      const reminder = { id: reminderId, ...doc.data() } as Reminder;
+
       const notificationTime = (reminder.nextNotificationTime as any).toDate();
       const missedBy = correctedNow.getTime() - notificationTime.getTime();
 
       if (missedBy < GRACE_PERIOD) {
         await sendMessage(reminder, correctedNow);
       } else {
-        console.warn(`[Scheduler] SKIPPED reminder "${reminder.message}" (too late by ${Math.round(missedBy / 60000)} mins)`);
+        console.warn(`[Scheduler] SKIPPED reminder "${reminder.message}" (too late)`);
         await missedNotificationsCollection.add({
           serverId: reminder.serverId,
           reminderMessage: reminder.message,
@@ -375,30 +407,20 @@ export const checkAndSendReminders = async () => {
       const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationAfterSend(reminder);
 
       if (nextNotificationTime) {
-        // ★★★★★ ここからが修正箇所です ★★★★★
-        const updateData: {
-          nextNotificationTime: Date; // Timestamp
-          nextOffsetIndex: number | null;
-          startTime?: string; // string
-        } = {
+        await reminderRef.update({
           nextNotificationTime,
           nextOffsetIndex,
-        };
-
-        if (reminder.recurrence.type === 'interval') {
-          // DateオブジェクトをISO文字列に変換して保存
-          updateData.startTime = notificationTime.toISOString();
-        }
-
-        await doc.ref.update(updateData);
-        // ★★★★★ ここまで ★★★★★
-
+          status: 'active',
+        });
       } else {
-        await doc.ref.update({ status: 'paused', nextNotificationTime: null, nextOffsetIndex: null });
+        await reminderRef.update({
+          nextNotificationTime: null,
+          nextOffsetIndex: null,
+          status: 'paused',
+        });
       }
-    });
-
-    await Promise.all(promises);
+      console.log(`[Scheduler] Processed and released lock for reminder ${reminderId}.`);
+    }
 
   } catch (error) {
     console.error('[Scheduler] Error during reminder check:', error);
