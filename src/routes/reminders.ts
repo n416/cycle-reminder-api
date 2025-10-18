@@ -264,15 +264,71 @@ router.delete('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
 
 router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
+    const { serverId } = req.params;
     const { channelId, message, selectedEmojis } = req.body;
 
     if (!channelId || !message) {
       return res.status(400).json({ message: 'channelId and message are required.' });
     }
 
+    let finalMessage = sanitizeMessage(message);
+
+    // {{all}} の置換ロジックをスケジューラーから移植
+    if (finalMessage.includes('{{all}}')) {
+      const now = new Date();
+      const twentyFourHoursLater = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+      const snapshot = await remindersCollection
+        .where('serverId', '==', serverId)
+        .where('status', '==', 'active')
+        .where('nextNotificationTime', '>=', now)
+        .where('nextNotificationTime', '<=', twentyFourHoursLater)
+        .orderBy('nextNotificationTime', 'asc')
+        .get();
+      
+      const upcomingNotifications = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() } as Reminder));
+      
+      const groupedByEvent = new Map<string, { message: string, time: Date, offsets: number[] }>();
+
+      for (const r of upcomingNotifications) {
+        const offsets = r.notificationOffsets || [0];
+        const currentOffset = offsets[r.nextOffsetIndex || 0];
+        // FirestoreのTimestampオブジェクトは toDate() メソッドでDateに変換
+        const baseCycleTime = new Date((r.nextNotificationTime as any).toDate().getTime() + currentOffset * 60 * 1000);
+        const key = r.message + baseCycleTime.toISOString();
+
+        if (!groupedByEvent.has(key)) {
+            const allOffsets = (r.notificationOffsets || []).filter(offset => offset > 0);
+            groupedByEvent.set(key, {
+              message: r.message.split('\n')[0],
+              time: baseCycleTime,
+              offsets: allOffsets,
+            });
+        }
+      }
+
+      let scheduleList = "24時間以内に予定されているリマインダーはありません。";
+      const events = Array.from(groupedByEvent.values()).sort((a,b) => a.time.getTime() - b.time.getTime());
+
+      if (events.length > 0) {
+        scheduleList = events.map(event => {
+          const time = event.time.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+          let offsetLabel = '';
+          if (event.offsets.length > 0) {
+            const sortedOffsets = event.offsets.sort((a, b) => b - a);
+            offsetLabel = `【${sortedOffsets.join(',')}分前通知】`;
+          }
+          return `\`${time}\` - ${event.message}${offsetLabel}`;
+        }).join('\n');
+      }
+
+      finalMessage = finalMessage.replace('{{all}}', `\n**--- 24時間以内の予定 ---**\n${scheduleList}`);
+    }
+
     const channel = await client.channels.fetch(channelId);
     if (channel && channel instanceof TextChannel) {
-      const testMessage = `＝＝＝テスト送信です＝＝＝\n${sanitizeMessage(message)}`;
+      const testMessage = `＝＝＝テスト送信です＝＝＝\n${finalMessage}`;
       const sentMessage = await channel.send(testMessage);
 
       if (selectedEmojis && selectedEmojis.length > 0) {

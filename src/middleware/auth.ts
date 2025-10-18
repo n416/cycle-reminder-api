@@ -19,11 +19,8 @@ export const protect = (req: AuthRequest, res: Response, next: NextFunction) => 
 
   const token = bearer.split('Bearer ')[1];
   try {
-    // ★★★★★ ここが修正箇所です ★★★★★
-    // トークンを検証し、デコードされたペイロード全体を req.user にセットする
     const payload = jwt.verify(token, process.env.DISCORD_CLIENT_SECRET!);
     req.user = payload;
-    // ★★★★★ ここまで ★★★★★
     next();
   } catch (error) {
     console.error('【バックエンド】トークンの検証に失敗しました:', error);
@@ -31,6 +28,7 @@ export const protect = (req: AuthRequest, res: Response, next: NextFunction) => 
   }
 };
 
+// ★★★★★ ここからが修正箇所です ★★★★★
 export const protectWrite = async (req: AuthRequest, res: Response, next: NextFunction) => {
   const writeToken = req.headers['x-write-token'] as string;
   const { id: reminderId, serverId: serverIdFromParams } = req.params;
@@ -42,7 +40,7 @@ export const protectWrite = async (req: AuthRequest, res: Response, next: NextFu
   try {
     const decoded = jwt.verify(writeToken, process.env.DISCORD_CLIENT_SECRET!) as { serverId: string; [key: string]: any };
     req.writeAccessInfo = decoded;
-    
+
     if (reminderId) {
       const reminderRef = db.collection('reminders').doc(reminderId);
       const reminderDoc = await reminderRef.get();
@@ -63,8 +61,12 @@ export const protectWrite = async (req: AuthRequest, res: Response, next: NextFu
     }
 
     next();
-  } catch (error) {
-    console.error('【バックエンド】書き込みトークンの検証に失敗しました:', error);
+  } catch (error: any) {
+    // catchブロックに詳細なエラーログを追加
+    console.error('!!! [WRITE DEBUG] 書き込みトークンの検証中にエラーが発生しました !!!');
+    console.error(`[WRITE DEBUG] エラー名: ${error.name}`);
+    console.error(`[WRITE DEBUG] エラーメッセージ: ${error.message}`);
+    console.error("[WRITE DEBUG] -> 無効な書き込みトークンのため 401 を返します。");
     return res.status(401).json({ message: 'Unauthorized: Invalid Write Token' });
   }
 };
