@@ -139,11 +139,10 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
           .where('nextNotificationTime', '<=', twentyFourHoursLater)
           .orderBy('nextNotificationTime', 'asc')
           .get();
-
         const upcomingNotifications = snapshot.docs
           .map(doc => ({ id: doc.id, ...doc.data() } as Reminder))
-          .filter(r => r.id !== reminder.id);
-
+          // 自分自身と、他の {{all}} を含むリマインダーを除外する
+          .filter(r => r.id !== reminder.id && !r.message.includes('{{all}}'));
         const groupedByEvent = new Map<string, { message: string, time: Date, offsets: number[] }>();
 
         for (const r of upcomingNotifications) {
@@ -163,7 +162,7 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
         }
 
         let scheduleList = "24時間以内に予定されているリマインダーはありません。";
-        const events = Array.from(groupedByEvent.values()).sort((a,b) => a.time.getTime() - b.time.getTime());
+        const events = Array.from(groupedByEvent.values()).sort((a, b) => a.time.getTime() - b.time.getTime());
 
         if (events.length > 0) {
           scheduleList = events.map(event => {

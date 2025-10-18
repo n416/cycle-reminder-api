@@ -285,10 +285,12 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
         .where('nextNotificationTime', '<=', twentyFourHoursLater)
         .orderBy('nextNotificationTime', 'asc')
         .get();
-      
+
       const upcomingNotifications = snapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() } as Reminder));
-      
+        .map(doc => ({ id: doc.id, ...doc.data() } as Reminder))
+        // {{all}} を含むリマインダーをすべて除外する
+        .filter(r => !r.message.includes('{{all}}'));
+
       const groupedByEvent = new Map<string, { message: string, time: Date, offsets: number[] }>();
 
       for (const r of upcomingNotifications) {
@@ -299,17 +301,17 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
         const key = r.message + baseCycleTime.toISOString();
 
         if (!groupedByEvent.has(key)) {
-            const allOffsets = (r.notificationOffsets || []).filter(offset => offset > 0);
-            groupedByEvent.set(key, {
-              message: r.message.split('\n')[0],
-              time: baseCycleTime,
-              offsets: allOffsets,
-            });
+          const allOffsets = (r.notificationOffsets || []).filter(offset => offset > 0);
+          groupedByEvent.set(key, {
+            message: r.message.split('\n')[0],
+            time: baseCycleTime,
+            offsets: allOffsets,
+          });
         }
       }
 
       let scheduleList = "24時間以内に予定されているリマインダーはありません。";
-      const events = Array.from(groupedByEvent.values()).sort((a,b) => a.time.getTime() - b.time.getTime());
+      const events = Array.from(groupedByEvent.values()).sort((a, b) => a.time.getTime() - b.time.getTime());
 
       if (events.length > 0) {
         scheduleList = events.map(event => {
