@@ -167,7 +167,7 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
 
         if (events.length > 0) {
           scheduleList = events.map(event => {
-            const time = event.time.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+            const time = event.time.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
             let offsetLabel = '';
             if (event.offsets.length > 0) {
               const sortedOffsets = event.offsets.sort((a, b) => b - a);

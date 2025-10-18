@@ -21,23 +21,15 @@ const addLogWithTrim = async (logData: object) => {
   }
 };
 
-/**
- * 次に実行すべき通知の情報を計算する
- * @param reminderData リマインダーのデータ
- * @param baseTime 計算の基準となる現在時刻
- * @returns { { nextNotificationTime: Date | null, nextOffsetIndex: number | null } } 次の通知時刻と、そのオフセットのインデックス
- */
 const calculateNextNotificationInfo = (
   reminderData: Omit<Reminder, 'id' | 'createdBy' | 'channel' | 'message' | 'status'>,
   baseTime: Date
 ): { nextNotificationTime: Date | null; nextOffsetIndex: number | null } => {
 
-  // ★★★ 複雑な型判定をやめ、stringを直接Dateに変換 ★★★
   const startDate = new Date(reminderData.startTime);
   if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null };
 
-  // --- 1. 次の「本来の実行時刻」（サイクルの起点）を計算する ---
-  let nextCycleTime: Date | null = null; // ★★★ 初期値を null に設定 ★★★
+  let nextCycleTime: Date | null = null;
 
   switch (reminderData.recurrence.type) {
     case 'none':
@@ -78,31 +70,26 @@ const calculateNextNotificationInfo = (
       for (let i = 0; i < 7; i++) {
         if (targetDaysOfWeek.has(nextDate.getDay())) {
           nextCycleTime = nextDate;
-          break; // 見つかったらループを抜ける
+          break;
         }
         nextDate.setDate(nextDate.getDate() + 1);
       }
-      // ★ ループ後に nextCycleTime が null のままなら何もしない (初期値のまま)
       break;
     }
     default:
       nextCycleTime = null;
   }
 
-  // 次のサイクルが見つからなければ、通知も存在しない
   if (!nextCycleTime) {
     return { nextNotificationTime: null, nextOffsetIndex: null };
   }
 
-  // --- 2. オフセットを適用して、実際に通知すべき時刻を探す ---
-  const offsets = reminderData.notificationOffsets || [0]; // オフセットがなければ [0] (時間丁度) とみなす
+  const offsets = reminderData.notificationOffsets || [0];
 
-  // 複数のオフセットの中から、「今」以降で一番近い（最初に来る）通知を探す
   for (let i = 0; i < offsets.length; i++) {
     const offsetMinutes = offsets[i];
     const notificationTime = new Date(nextCycleTime.getTime() - offsetMinutes * 60 * 1000);
 
-    // その通知時刻が「今」より後であれば、それが次に通知すべき時刻
     if (notificationTime > baseTime) {
       return {
         nextNotificationTime: notificationTime,
@@ -111,13 +98,8 @@ const calculateNextNotificationInfo = (
     }
   }
 
-  // 「今」を過ぎていないオフセット通知が一つもなかった場合
-  // (例: 12:30のボスに対し、[10, 5]オフセットを設定していて、現在時刻が12:28の場合)
-  // → このサイクルの通知はすべて終わっているので、次のサイクルの最初の通知を探す必要がある
-  // (この処理はスケジューラー側で行うので、ここでは null を返す)
   return { nextNotificationTime: null, nextOffsetIndex: null };
 };
-// ★★★★★ ここまで ★★★★★
 
 const sanitizeMessage = (message: string): string => {
   return message
@@ -139,20 +121,18 @@ router.get('/:serverId', protect, async (req: AuthRequest, res) => {
   }
 });
 
-// ★★★★★ POST /:serverId の修正 ★★★★★
 router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
     const { userId, ...reminderData } = req.body;
 
-    // オフセットをパースし、降順にソート
     const offsets = (reminderData.notificationOffsets || [0])
       .filter((n: number) => typeof n === 'number' && n >= 0)
       .sort((a: number, b: number) => b - a);
 
     const dataWithOffsets = {
       ...reminderData,
-      notificationOffsets: offsets.length > 0 ? offsets : [0], // 空の場合は[0]を保証
+      notificationOffsets: offsets.length > 0 ? offsets : [0],
     };
 
     const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(dataWithOffsets as any, new Date());
@@ -161,7 +141,7 @@ router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) =
       ...dataWithOffsets,
       serverId: serverId,
       createdBy: req.user.id,
-      nextNotificationTime: nextNotificationTime, // Timestamp
+      nextNotificationTime: nextNotificationTime,
       nextOffsetIndex: nextOffsetIndex,
       selectedEmojis: reminderData.selectedEmojis || [],
     };
@@ -184,7 +164,6 @@ router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) =
   }
 });
 
-// ★★★★★ PUT /:id の修正 ★★★★★
 router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
@@ -196,7 +175,6 @@ router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Reminder not found." });
     }
 
-    // オフセットをパースし、降順にソート
     const offsets = (req.body.notificationOffsets || [0])
       .filter((n: number) => typeof n === 'number' && n >= 0)
       .sort((a: number, b: number) => b - a);
@@ -211,7 +189,7 @@ router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
 
     await docRef.update({
       ...updatedData,
-      nextNotificationTime, // Timestamp
+      nextNotificationTime,
       nextOffsetIndex,
     });
 
@@ -262,6 +240,8 @@ router.delete('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
   }
 });
 
+
+// ★★★★★ ここから下の test-send の中身を全面的に書き換えます ★★★★★
 router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
@@ -273,8 +253,8 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
 
     let finalMessage = sanitizeMessage(message);
 
-    // {{all}} の置換ロジックをスケジューラーから移植
     if (finalMessage.includes('{{all}}')) {
+      console.log(`[Test Send - DEBUG] {{all}} block entered for server ${serverId}.`);
       const now = new Date();
       const twentyFourHoursLater = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
@@ -286,17 +266,27 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
         .orderBy('nextNotificationTime', 'asc')
         .get();
 
+      console.log(`[Test Send - DEBUG] Found ${snapshot.size} upcoming reminders in query.`);
+
       const upcomingNotifications = snapshot.docs
         .map(doc => ({ id: doc.id, ...doc.data() } as Reminder))
-        // {{all}} を含むリマインダーをすべて除外する
         .filter(r => !r.message.includes('{{all}}'));
 
       const groupedByEvent = new Map<string, { message: string, time: Date, offsets: number[] }>();
 
       for (const r of upcomingNotifications) {
+        console.log(`[Test Send - DEBUG] Processing reminder: "${r.message}" (ID: ${r.id})`);
+        console.log(`[Test Send - DEBUG]   -> nextNotificationTime value:`, r.nextNotificationTime);
+
+        // 安全装置：nextNotificationTime が不正な形式の場合、このリマインダーをスキップする
+        if (!r.nextNotificationTime || typeof (r.nextNotificationTime as any).toDate !== 'function') {
+          console.error(`[Test Send - FATAL] Reminder ID ${r.id} has an invalid nextNotificationTime. It's not a Firestore Timestamp. Skipping.`);
+          continue; // このリマインダーの処理を中断し、次のループへ
+        }
+
         const offsets = r.notificationOffsets || [0];
         const currentOffset = offsets[r.nextOffsetIndex || 0];
-        // FirestoreのTimestampオブジェクトは toDate() メソッドでDateに変換
+
         const baseCycleTime = new Date((r.nextNotificationTime as any).toDate().getTime() + currentOffset * 60 * 1000);
         const key = r.message + baseCycleTime.toISOString();
 
@@ -315,7 +305,7 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
 
       if (events.length > 0) {
         scheduleList = events.map(event => {
-          const time = event.time.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+          const time = event.time.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
           let offsetLabel = '';
           if (event.offsets.length > 0) {
             const sortedOffsets = event.offsets.sort((a, b) => b - a);
@@ -342,20 +332,17 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
           }
         }
       }
-
       res.status(200).json({ message: 'Test message sent successfully.' });
     } else {
       res.status(404).json({ message: 'Channel not found or is not a text channel.' });
     }
   } catch (error) {
-    console.error("Failed to send test message:", error);
+    console.error("!!! [Test Send - ERROR] An error occurred during test send:", error);
     res.status(500).json({ error: 'Failed to send test message' });
   }
 });
+// ★★★★★ ここまで ★★★★★
 
-/**
- * 「24時間以内の予定」リマインダーを簡易作成するための専用エンドポイント
- */
 router.post('/:serverId/daily-summary', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
@@ -382,9 +369,7 @@ router.post('/:serverId/daily-summary', protect, protectWrite, async (req: AuthR
     const startTime = new Date();
     startTime.setHours(hours, minutes, 0, 0);
 
-    // ★★★★★ ここからが修正箇所です ★★★★★
     const reminderData = {
-      // serverId をこのオブジェクトに追加します
       serverId: serverId,
       message: '今日の予定\n{{all}}',
       channel: channelName,
@@ -397,17 +382,14 @@ router.post('/:serverId/daily-summary', protect, protectWrite, async (req: AuthR
       hideNextTime: false,
     };
 
-    // これで calculateNextNotificationInfo に渡すオブジェクトに serverId が含まれます
     const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(reminderData, new Date());
 
     const newReminderData = {
       ...reminderData,
-      // serverIdは↑で追加済みなので、ここではcreatedByを追加するだけでOK
       createdBy: req.user.id,
       nextNotificationTime: nextNotificationTime,
       nextOffsetIndex: nextOffsetIndex,
     };
-    // ★★★★★ ここまで ★★★★★
 
     const docRef = await remindersCollection.add(newReminderData);
     const result = { id: docRef.id, ...newReminderData };
