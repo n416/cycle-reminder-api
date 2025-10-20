@@ -122,6 +122,12 @@ router.get('/:serverId', protect, async (req: AuthRequest, res) => {
 });
 
 router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) => {
+
+  const appRole = req.user.role;
+  if (appRole !== 'owner' && appRole !== 'tester') {
+    return res.status(403).json({ message: 'Forbidden: Only owners or testers can create new reminders.' });
+  }
+
   try {
     const { serverId } = req.params;
     const { userId, ...reminderData } = req.body;
@@ -241,7 +247,6 @@ router.delete('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
 });
 
 
-// ★★★★★ ここから下の test-send の中身を全面的に書き換えます ★★★★★
 router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
@@ -278,10 +283,9 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
         console.log(`[Test Send - DEBUG] Processing reminder: "${r.message}" (ID: ${r.id})`);
         console.log(`[Test Send - DEBUG]   -> nextNotificationTime value:`, r.nextNotificationTime);
 
-        // 安全装置：nextNotificationTime が不正な形式の場合、このリマインダーをスキップする
         if (!r.nextNotificationTime || typeof (r.nextNotificationTime as any).toDate !== 'function') {
           console.error(`[Test Send - FATAL] Reminder ID ${r.id} has an invalid nextNotificationTime. It's not a Firestore Timestamp. Skipping.`);
-          continue; // このリマインダーの処理を中断し、次のループへ
+          continue;
         }
 
         const offsets = r.notificationOffsets || [0];
@@ -311,10 +315,8 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
             const sortedOffsets = event.offsets.sort((a, b) => b - a);
             offsetLabel = `【${sortedOffsets.join(',')}分前通知】`;
           }
-          // ★★★ ここからが修正箇所です ★★★
           const eventMessage = event.message.replace(/\{\{\s*offset\s*\}\}/g, '').trim();
           return `\`${time}\` - ${eventMessage}${offsetLabel}`;
-          // ★★★ ここまで ★★★
         }).join('\n');
       }
 
@@ -344,7 +346,6 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
     res.status(500).json({ error: 'Failed to send test message' });
   }
 });
-// ★★★★★ ここまで ★★★★★
 
 router.post('/:serverId/daily-summary', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
