@@ -113,12 +113,13 @@ const calculateNextCycleStartTimeForDisplay = (reminder: Reminder): Date | null 
 /**
  * 【スケジューラー用】次にDBに保存すべき通知情報を計算する
  */
+// ★★★★★ ここからが修正箇所です ★★★★★
 const calculateNextNotificationAfterSend = (
   reminder: Reminder
-): { nextNotificationTime: Date | null; nextOffsetIndex: number | null } => {
+): { nextNotificationTime: Date | null; nextOffsetIndex: number | null; newStartTime: string | null } => {
 
   const startDate = new Date(reminder.startTime);
-  if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null };
+  if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null, newStartTime: null };
 
   const offsets = reminder.notificationOffsets || [0];
   const currentOffsetIndex = reminder.nextOffsetIndex || 0;
@@ -134,11 +135,13 @@ const calculateNextNotificationAfterSend = (
     return {
       nextNotificationTime,
       nextOffsetIndex: nextOffsetIndexInCycle,
+      newStartTime: null, // サイクルが完了していないので基準日時は更新しない
     };
   }
 
   // --- 次のサイクルの最初の通知を計算 ---
   let nextCycleTime: Date | null = null;
+  // 完了したサイクルの基準時刻を計算（これが新しいstartTimeになる）
   const lastCycleTime = new Date((reminder.nextNotificationTime as any).toDate().getTime() + offsets[currentOffsetIndex] * 60 * 1000);
 
   switch (reminder.recurrence.type) {
@@ -179,8 +182,9 @@ const calculateNextNotificationAfterSend = (
     }
   }
 
+  // 繰り返しがない、または次のサイクルが見つからない場合
   if (!nextCycleTime) {
-    return { nextNotificationTime: null, nextOffsetIndex: null };
+    return { nextNotificationTime: null, nextOffsetIndex: null, newStartTime: null };
   }
 
   const firstOffset = offsets[0];
@@ -189,8 +193,10 @@ const calculateNextNotificationAfterSend = (
   return {
     nextNotificationTime,
     nextOffsetIndex: 0,
+    newStartTime: lastCycleTime.toISOString(), // 完了したサイクルの時刻を新しい基準日時として返す
   };
 };
+// ★★★★★ ここまで ★★★★★
 
 const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
   try {
@@ -247,10 +253,8 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
               const sortedOffsets = event.offsets.sort((a, b) => b - a);
               offsetLabel = `【${sortedOffsets.join(',')}分前通知】`;
             }
-            // ★★★ ここからが修正箇所です ★★★
             const eventMessage = event.message.replace(/\{\{\s*offset\s*\}\}/g, '').trim();
             return `\`${time}\` - ${eventMessage}${offsetLabel}`;
-            // ★★★ ここまで ★★★
           }).join('\n');
         }
 
@@ -407,21 +411,26 @@ export const checkAndSendReminders = async () => {
         });
       }
 
-      const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationAfterSend(reminder);
+      // ★★★★★ ここからが修正箇所です ★★★★★
+      const { nextNotificationTime, nextOffsetIndex, newStartTime } = calculateNextNotificationAfterSend(reminder);
+
+      const updatePayload: { [key: string]: any } = {};
 
       if (nextNotificationTime) {
-        await reminderRef.update({
-          nextNotificationTime,
-          nextOffsetIndex,
-          status: 'active',
-        });
+        updatePayload.nextNotificationTime = nextNotificationTime;
+        updatePayload.nextOffsetIndex = nextOffsetIndex;
+        updatePayload.status = 'active';
+        if (newStartTime) {
+          updatePayload.startTime = newStartTime;
+        }
       } else {
-        await reminderRef.update({
-          nextNotificationTime: null,
-          nextOffsetIndex: null,
-          status: 'paused',
-        });
+        updatePayload.nextNotificationTime = null;
+        updatePayload.nextOffsetIndex = null;
+        updatePayload.status = 'paused';
       }
+
+      await reminderRef.update(updatePayload);
+      // ★★★★★ ここまで ★★★★★
       console.log(`[Scheduler] Processed and released lock for reminder ${reminderId}.`);
     }
 
