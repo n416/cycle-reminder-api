@@ -311,7 +311,10 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
             const sortedOffsets = event.offsets.sort((a, b) => b - a);
             offsetLabel = `【${sortedOffsets.join(',')}分前通知】`;
           }
-          return `\`${time}\` - ${event.message}${offsetLabel}`;
+          // ★★★ ここからが修正箇所です ★★★
+          const eventMessage = event.message.replace(/\{\{\s*offset\s*\}\}/g, '').trim();
+          return `\`${time}\` - ${eventMessage}${offsetLabel}`;
+          // ★★★ ここまで ★★★
         }).join('\n');
       }
 

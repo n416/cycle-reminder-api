@@ -247,8 +247,10 @@ const sendMessage = async (reminder: Reminder, correctedNow: Date) => {
               const sortedOffsets = event.offsets.sort((a, b) => b - a);
               offsetLabel = `【${sortedOffsets.join(',')}分前通知】`;
             }
-            const eventMessage = event.message.replace(/\{\{offset\}\}/g, '').trim();
+            // ★★★ ここからが修正箇所です ★★★
+            const eventMessage = event.message.replace(/\{\{\s*offset\s*\}\}/g, '').trim();
             return `\`${time}\` - ${eventMessage}${offsetLabel}`;
+            // ★★★ ここまで ★★★
           }).join('\n');
         }
 
