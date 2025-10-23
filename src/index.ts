@@ -1,12 +1,13 @@
-import express from 'express';
-import cors from 'cors';
+import express, { Request, Response, NextFunction } from 'express';
+import cors, { CorsOptions } from 'cors';
 import dotenv from 'dotenv';
 import { Client, GatewayIntentBits } from 'discord.js';
 import authRouter from './routes/auth';
 import remindersRouter from './routes/reminders';
 import serversRouter from './routes/servers';
 import logsRouter from './routes/logs';
-import { checkAndSendReminders } from './scheduler';
+import { checkAndSendReminders, synchronizeClock } from './scheduler';
+import paymentRouter from './routes/payment';
 import missedNotificationsRouter from './routes/missedNotifications';
 
 dotenv.config();
@@ -14,43 +15,107 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-export const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+const allowedOrigins = [
+  'http://localhost:5173',
+];
+if (process.env.NODE_ENV === 'production' && process.env.FRONTEND_URL_PROD) {
+  allowedOrigins.push(process.env.FRONTEND_URL_PROD);
+}
+
+const corsOptions: CorsOptions = {
+  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  optionsSuccessStatus: 200,
+};
+
+app.use(cors(corsOptions));
+
+
+app.use(express.json({
+    verify: (req: Request & { rawBody?: Buffer }, _res, buf) => {
+        if (req.originalUrl.startsWith('/api/payment/webhook')) {
+            req.rawBody = buf;
+        }
+    }
+}));
+
+
+export const client = new Client({ 
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildEmojisAndStickers 
+  ] 
+});
 
 const SCHEDULER_INTERVAL = 60 * 1000;
 
-const runScheduler = () => {
-  checkAndSendReminders()
-    .catch(console.error)
-    .finally(() => {
-      setTimeout(runScheduler, SCHEDULER_INTERVAL);
-    });
+const startScheduler = () => {
+  const now = new Date();
+  const seconds = now.getSeconds();
+  const milliseconds = now.getMilliseconds();
+  
+  const delay = (60 - seconds) * 1000 - milliseconds;
+
+  console.log(`[Scheduler] Starting scheduler. First check will run in ${delay / 1000} seconds.`);
+
+  setTimeout(() => {
+    checkAndSendReminders().catch(console.error);
+    
+    setInterval(() => {
+      checkAndSendReminders().catch(console.error);
+    }, SCHEDULER_INTERVAL);
+  }, delay);
 };
 
-client.once('ready', () => {
-  console.log(`Bot logged in as ${client.user?.tag}!`);
-  console.log('[Scheduler] Starting scheduler...');
-  runScheduler();
-});
+const main = async () => {
+  try {
+    // アプリケーション起動時に、まず一度だけ時刻を同期する
+    await synchronizeClock();
 
-client.login(process.env.DISCORD_BOT_TOKEN);
+    app.use('/api', (_req: Request, _res: Response, next: NextFunction) => {
+      next();
+    });
 
-app.use(cors());
-app.use(express.json());
+    app.get('/', (_req: Request, res: Response) => {
+      res.send('Cycle Reminder API is running!');
+    });
+    
+    // 時刻確認用のエンドポイント
+    app.get('/api/time-check', (_req: Request, res: Response) => {
+      const serverTime = new Date();
+      res.status(200).json({
+        iso: serverTime.toISOString(),
+        locale: serverTime.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }),
+        message: "This is the current time on the server.",
+      });
+    });
 
-app.use('/api', (_req, _res, next) => {
-  next();
-});
+    app.use('/api/auth', authRouter);
+    app.use('/api/reminders', remindersRouter);
+    app.use('/api/servers', serversRouter);
+    app.use('/api/logs', logsRouter);
+    app.use('/api/payment', paymentRouter);
+    app.use('/api/missed-notifications', missedNotificationsRouter);
+    
+    await client.login(process.env.DISCORD_BOT_TOKEN);
+    console.log(`Bot logged in as ${client.user?.tag}!`);
 
-app.get('/', (_req, res) => {
-  res.send('Cycle Reminder API is running!');
-});
+    app.listen(PORT, () => {
+      console.log(`API Server is running on port ${PORT}`);
+    });
 
-app.use('/api/auth', authRouter);
-app.use('/api/reminders', remindersRouter);
-app.use('/api/servers', serversRouter);
-app.use('/api/logs', logsRouter);
-app.use('/api/missed-notifications', missedNotificationsRouter);
+    startScheduler();
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+  } catch (error) {
+    console.error("Failed to start the application:", error);
+    process.exit(1);
+  }
+};
+
+main();

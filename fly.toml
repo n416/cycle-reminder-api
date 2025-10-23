@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for cycle-reminder-api on 2025-10-07T16:47:10Z
+# fly.toml app configuration file generated for cycle-reminder-api-frosty-water-437 on 2025-10-08T02:17:56+09:00
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
@@ -9,9 +9,9 @@ primary_region = 'sjc'
 [build]
 
 [http_service]
-  internal_port = 3000
+  internal_port = 8080
   force_https = true
-  auto_stop_machines = 'stop'
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 0
   processes = ['app']
@@ -20,4 +20,3 @@ primary_region = 'sjc'
   memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 1024

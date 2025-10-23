@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { db } from '../config/firebase';
 import { protect, protectWrite, AuthRequest } from '../middleware/auth';
 import { Reminder } from '../types';
+import { client } from '../index';
+import { TextChannel } from 'discord.js';
 
 const router = Router();
 const remindersCollection = db.collection('reminders');
@@ -19,51 +21,92 @@ const addLogWithTrim = async (logData: object) => {
   }
 };
 
-// 次の通知時刻を計算する関数（新規作成・更新時に使用）
-const calculateNextOccurrence = (reminder: Omit<Reminder, 'id' | 'createdBy'>, baseTime: Date): Date | null => {
-    const startDate = new Date(reminder.startTime);
-    if (isNaN(startDate.getTime())) return null;
-  
-    switch (reminder.recurrence.type) {
-      case 'none':
-        return startDate >= baseTime ? startDate : null;
-  
-      case 'interval': {
-        let nextIntervalDate = new Date(startDate);
-        while (nextIntervalDate <= baseTime) {
-          nextIntervalDate.setHours(nextIntervalDate.getHours() + reminder.recurrence.hours);
-        }
-        return nextIntervalDate;
-      }
-  
-      case 'weekly': {
-        const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
-        const targetDaysOfWeek = new Set(reminder.recurrence.days.map(day => dayMap[day]));
+const calculateNextNotificationInfo = (
+  reminderData: Omit<Reminder, 'id' | 'createdBy' | 'channel' | 'message' | 'status'>,
+  baseTime: Date
+): { nextNotificationTime: Date | null; nextOffsetIndex: number | null } => {
 
-        if (targetDaysOfWeek.size === 0) return null;
-  
-        let nextDate = new Date(baseTime);
-        nextDate.setHours(startDate.getHours(), startDate.getMinutes(), startDate.getSeconds(), 0);
+  const startDate = new Date(reminderData.startTime);
+  if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null };
 
-        if (nextDate <= baseTime) {
-            nextDate.setDate(nextDate.getDate() + 1);
-        }
-        
-        for (let i = 0; i < 7; i++) {
-            if (targetDaysOfWeek.has(nextDate.getDay())) {
-                let finalDate = new Date(nextDate);
-                finalDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
-                if(finalDate < startDate) {
-                    nextDate.setDate(nextDate.getDate() + 1);
-                    continue;
-                };
-                return finalDate;
-            }
-            nextDate.setDate(nextDate.getDate() + 1);
-        }
+  let nextCycleTime: Date | null = null;
+
+  switch (reminderData.recurrence.type) {
+    case 'none':
+      nextCycleTime = startDate >= baseTime ? startDate : null;
+      break;
+
+    case 'daily': {
+      let nextDate = baseTime > startDate ? new Date(baseTime) : new Date(startDate);
+      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+      if (nextDate <= baseTime) {
+        nextDate.setDate(nextDate.getDate() + 1);
       }
+      nextCycleTime = nextDate;
+      break;
     }
-    return null;
+
+    case 'interval': {
+      let nextDate = new Date(startDate);
+      while (nextDate <= baseTime) {
+        nextDate.setHours(nextDate.getHours() + reminderData.recurrence.hours);
+      }
+      nextCycleTime = nextDate;
+      break;
+    }
+
+    case 'weekly': {
+      const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+      const targetDaysOfWeek = new Set(reminderData.recurrence.days.map(day => dayMap[day]));
+      if (targetDaysOfWeek.size === 0) {
+        nextCycleTime = null;
+        break;
+      }
+      let nextDate = baseTime > startDate ? new Date(baseTime) : new Date(startDate);
+      nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
+      if (nextDate <= baseTime) {
+        nextDate.setDate(nextDate.getDate() + 1);
+      }
+      for (let i = 0; i < 7; i++) {
+        if (targetDaysOfWeek.has(nextDate.getDay())) {
+          nextCycleTime = nextDate;
+          break;
+        }
+        nextDate.setDate(nextDate.getDate() + 1);
+      }
+      break;
+    }
+    default:
+      nextCycleTime = null;
+  }
+
+  if (!nextCycleTime) {
+    return { nextNotificationTime: null, nextOffsetIndex: null };
+  }
+
+  const offsets = reminderData.notificationOffsets || [0];
+
+  for (let i = 0; i < offsets.length; i++) {
+    const offsetMinutes = offsets[i];
+    const notificationTime = new Date(nextCycleTime.getTime() - offsetMinutes * 60 * 1000);
+
+    if (notificationTime > baseTime) {
+      return {
+        nextNotificationTime: notificationTime,
+        nextOffsetIndex: i
+      };
+    }
+  }
+
+  return { nextNotificationTime: null, nextOffsetIndex: null };
+};
+
+const sanitizeMessage = (message: string): string => {
+  return message
+    .replace(/@everyone/g, '＠everyone')
+    .replace(/@here/g, '＠here')
+    .replace(/<@&(\d+)>/g, '＠ロール')
+    .replace(/<@!?(\d+)>/g, '＠ユーザー');
 };
 
 router.get('/:serverId', protect, async (req: AuthRequest, res) => {
@@ -79,18 +122,36 @@ router.get('/:serverId', protect, async (req: AuthRequest, res) => {
 });
 
 router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) => {
+
+  const appRole = req.user.role;
+  if (appRole !== 'owner' && appRole !== 'tester') {
+    return res.status(403).json({ message: 'Forbidden: Only owners or testers can create new reminders.' });
+  }
+
   try {
     const { serverId } = req.params;
     const { userId, ...reminderData } = req.body;
-    
-    const nextNotificationTime = calculateNextOccurrence(reminderData, new Date());
-    const newReminderData = { 
-      ...reminderData, 
-      serverId: serverId, 
+
+    const offsets = (reminderData.notificationOffsets || [0])
+      .filter((n: number) => typeof n === 'number' && n >= 0)
+      .sort((a: number, b: number) => b - a);
+
+    const dataWithOffsets = {
+      ...reminderData,
+      notificationOffsets: offsets.length > 0 ? offsets : [0],
+    };
+
+    const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(dataWithOffsets as any, new Date());
+
+    const newReminderData = {
+      ...dataWithOffsets,
+      serverId: serverId,
       createdBy: req.user.id,
       nextNotificationTime: nextNotificationTime,
+      nextOffsetIndex: nextOffsetIndex,
+      selectedEmojis: reminderData.selectedEmojis || [],
     };
-    
+
     const docRef = await remindersCollection.add(newReminderData);
     const result = { id: docRef.id, ...newReminderData };
 
@@ -112,7 +173,6 @@ router.post('/:serverId', protect, protectWrite, async (req: AuthRequest, res) =
 router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
-    const updatedData = req.body;
     const docRef = remindersCollection.doc(id);
     const beforeSnap = await docRef.get();
     const beforeData = beforeSnap.data();
@@ -120,25 +180,41 @@ router.put('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
     if (!beforeData) {
       return res.status(404).json({ error: "Reminder not found." });
     }
-    
-    const nextNotificationTime = calculateNextOccurrence(updatedData, new Date());
-    await docRef.update({ ...updatedData, nextNotificationTime });
+
+    const offsets = (req.body.notificationOffsets || [0])
+      .filter((n: number) => typeof n === 'number' && n >= 0)
+      .sort((a: number, b: number) => b - a);
+
+    const updatedData = {
+      ...req.body,
+      notificationOffsets: offsets.length > 0 ? offsets : [0],
+      selectedEmojis: req.body.selectedEmojis || [],
+    };
+
+    const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(updatedData as any, new Date());
+
+    await docRef.update({
+      ...updatedData,
+      nextNotificationTime,
+      nextOffsetIndex,
+    });
 
     await addLogWithTrim({
       user: req.user.username,
       action: '更新',
       reminderMessage: updatedData.message,
       before: { id, ...beforeData },
-      after: { id, ...updatedData },
+      after: { id, ...updatedData, nextNotificationTime, nextOffsetIndex },
       serverId: beforeData.serverId,
     });
 
-    res.status(200).json({ id, ...updatedData, nextNotificationTime });
+    res.status(200).json({ id, ...updatedData, nextNotificationTime, nextOffsetIndex });
   } catch (error) {
     console.error("Failed to update reminder:", error);
     res.status(500).json({ error: 'Failed to update reminder' });
   }
 });
+
 
 router.delete('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
   try {
@@ -162,11 +238,178 @@ router.delete('/:id', protect, protectWrite, async (req: AuthRequest, res) => {
         serverId: beforeData.serverId,
       });
     }
-    
+
     res.status(200).json({ message: 'Reminder deleted successfully' });
   } catch (error) {
     console.error("Failed to delete reminder:", error);
     res.status(500).json({ error: 'Failed to delete reminder' });
+  }
+});
+
+
+router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthRequest, res) => {
+  try {
+    const { serverId } = req.params;
+    const { channelId, message, selectedEmojis } = req.body;
+
+    if (!channelId || !message) {
+      return res.status(400).json({ message: 'channelId and message are required.' });
+    }
+
+    let finalMessage = sanitizeMessage(message);
+
+    if (finalMessage.includes('{{all}}')) {
+      console.log(`[Test Send - DEBUG] {{all}} block entered for server ${serverId}.`);
+      const now = new Date();
+      const twentyFourHoursLater = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+      const snapshot = await remindersCollection
+        .where('serverId', '==', serverId)
+        .where('status', '==', 'active')
+        .where('nextNotificationTime', '>=', now)
+        .where('nextNotificationTime', '<=', twentyFourHoursLater)
+        .orderBy('nextNotificationTime', 'asc')
+        .get();
+
+      console.log(`[Test Send - DEBUG] Found ${snapshot.size} upcoming reminders in query.`);
+
+      const upcomingNotifications = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() } as Reminder))
+        .filter(r => !r.message.includes('{{all}}'));
+
+      const groupedByEvent = new Map<string, { message: string, time: Date, offsets: number[] }>();
+
+      for (const r of upcomingNotifications) {
+        console.log(`[Test Send - DEBUG] Processing reminder: "${r.message}" (ID: ${r.id})`);
+        console.log(`[Test Send - DEBUG]   -> nextNotificationTime value:`, r.nextNotificationTime);
+
+        if (!r.nextNotificationTime || typeof (r.nextNotificationTime as any).toDate !== 'function') {
+          console.error(`[Test Send - FATAL] Reminder ID ${r.id} has an invalid nextNotificationTime. It's not a Firestore Timestamp. Skipping.`);
+          continue;
+        }
+
+        const offsets = r.notificationOffsets || [0];
+        const currentOffset = offsets[r.nextOffsetIndex || 0];
+
+        const baseCycleTime = new Date((r.nextNotificationTime as any).toDate().getTime() + currentOffset * 60 * 1000);
+        const key = r.message + baseCycleTime.toISOString();
+
+        if (!groupedByEvent.has(key)) {
+          const allOffsets = (r.notificationOffsets || []).filter(offset => offset > 0);
+          groupedByEvent.set(key, {
+            message: r.message.split('\n')[0],
+            time: baseCycleTime,
+            offsets: allOffsets,
+          });
+        }
+      }
+
+      let scheduleList = "24時間以内に予定されているリマインダーはありません。";
+      const events = Array.from(groupedByEvent.values()).sort((a, b) => a.time.getTime() - b.time.getTime());
+
+      if (events.length > 0) {
+        scheduleList = events.map(event => {
+          const time = event.time.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
+          let offsetLabel = '';
+          if (event.offsets.length > 0) {
+            const sortedOffsets = event.offsets.sort((a, b) => b - a);
+            offsetLabel = `【${sortedOffsets.join(',')}分前通知】`;
+          }
+          const eventMessage = event.message.replace(/\{\{\s*offset\s*\}\}/g, '').trim();
+          return `\`${time}\` - ${eventMessage}${offsetLabel}`;
+        }).join('\n');
+      }
+
+      finalMessage = finalMessage.replace('{{all}}', `\n**--- 24時間以内の予定 ---**\n${scheduleList}`);
+    }
+
+    const channel = await client.channels.fetch(channelId);
+    if (channel && channel instanceof TextChannel) {
+      const testMessage = `＝＝＝テスト送信です＝＝＝\n${finalMessage}`;
+      const sentMessage = await channel.send(testMessage);
+
+      if (selectedEmojis && selectedEmojis.length > 0) {
+        for (const emojiId of selectedEmojis) {
+          try {
+            await sentMessage.react(emojiId);
+          } catch (reactError) {
+            console.warn(`[Test Send] Failed to react with emoji ${emojiId}.`);
+          }
+        }
+      }
+      res.status(200).json({ message: 'Test message sent successfully.' });
+    } else {
+      res.status(404).json({ message: 'Channel not found or is not a text channel.' });
+    }
+  } catch (error) {
+    console.error("!!! [Test Send - ERROR] An error occurred during test send:", error);
+    res.status(500).json({ error: 'Failed to send test message' });
+  }
+});
+
+router.post('/:serverId/daily-summary', protect, protectWrite, async (req: AuthRequest, res) => {
+  try {
+    const { serverId } = req.params;
+    const { channelId, time } = req.body;
+
+    if (!channelId || !time || !/^\d{2}:\d{2}$/.test(time)) {
+      return res.status(400).json({ error: 'channelId and time (HH:mm format) are required.' });
+    }
+
+    let channelName = '';
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (channel && channel instanceof TextChannel) {
+        channelName = channel.name;
+      } else {
+        return res.status(404).json({ error: 'Channel not found or is not a text channel.' });
+      }
+    } catch (e) {
+      console.error("Failed to fetch channel details:", e);
+      return res.status(404).json({ error: 'Channel not found.' });
+    }
+
+    const [hours, minutes] = time.split(':').map(Number);
+    const startTime = new Date();
+    startTime.setHours(hours, minutes, 0, 0);
+
+    const reminderData = {
+      serverId: serverId,
+      message: '今日の予定\n{{all}}',
+      channel: channelName,
+      channelId: channelId,
+      startTime: startTime.toISOString(),
+      recurrence: { type: 'daily' as const },
+      status: 'active' as const,
+      notificationOffsets: [0],
+      selectedEmojis: [],
+      hideNextTime: false,
+    };
+
+    const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(reminderData, new Date());
+
+    const newReminderData = {
+      ...reminderData,
+      createdBy: req.user.id,
+      nextNotificationTime: nextNotificationTime,
+      nextOffsetIndex: nextOffsetIndex,
+    };
+
+    const docRef = await remindersCollection.add(newReminderData);
+    const result = { id: docRef.id, ...newReminderData };
+
+    await addLogWithTrim({
+      user: req.user.username,
+      action: '作成 (今日の予定)',
+      reminderMessage: result.message,
+      after: result,
+      serverId: serverId,
+    });
+
+    res.status(201).json(result);
+  } catch (error) {
+    console.error("Failed to create daily summary reminder:", error);
+    res.status(500).json({ error: 'Failed to create daily summary reminder' });
   }
 });
 
