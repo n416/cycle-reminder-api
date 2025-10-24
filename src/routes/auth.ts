@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { db } from '../config/firebase';
 import { protect, AuthRequest } from '../middleware/auth';
+import { DocumentData } from 'firebase-admin/firestore';
 
 dotenv.config();
 const router = Router();
@@ -13,6 +14,26 @@ if (!TESTER_PASSWORD) {
     console.warn("Warning: TESTER_PASSWORD is not set. Tester login will be disabled.");
 }
 
+const hasActiveSubscription = (userData: DocumentData | null | undefined): boolean => {
+    if (!userData) {
+        return false;
+    }
+    const status = userData.subscriptionStatus;
+    const expiresAt = userData.expiresAt;
+
+    if (status !== 'active') {
+        return false;
+    }
+
+    if (expiresAt) {
+        if (new Date(expiresAt) < new Date()) {
+            return false;
+        }
+    }
+    
+    return true;
+};
+
 router.post('/verify-tester', (req: Request, res: Response) => {
     const { password } = req.body;
     if (!TESTER_PASSWORD || password !== TESTER_PASSWORD) {
@@ -21,13 +42,11 @@ router.post('/verify-tester', (req: Request, res: Response) => {
     res.status(200).json({ message: 'Tester password verified.' });
 });
 
-// ★★★★★ ここからが修正箇所です ★★★★★
 router.get('/discord', (req: Request, res: Response) => {
-    const { role, redirectPath } = req.query; // redirectPathを受け取る
+    const { role, redirectPath } = req.query;
     if (role !== 'owner' && role !== 'supporter' && role !== 'tester') {
         return res.status(400).send('Invalid role specified.');
     }
-    // stateにroleとredirectPathの両方を含める
     const state = Buffer.from(JSON.stringify({ role, redirectPath })).toString('base64');
     const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI!)}&response_type=code&scope=identify%20guilds&state=${state}`;
     res.redirect(discordAuthUrl);
@@ -44,7 +63,6 @@ router.get('/discord/callback', async (req: Request, res: Response) => {
     let roleIntent: 'owner' | 'supporter' | 'tester';
     let redirectPath: string | undefined;
     try {
-        // stateからroleとredirectPathの両方を取り出す
         const decodedState = JSON.parse(Buffer.from(state as string, 'base64').toString('utf-8'));
         roleIntent = decodedState.role;
         redirectPath = decodedState.redirectPath;
@@ -75,18 +93,20 @@ router.get('/discord/callback', async (req: Request, res: Response) => {
             id: user.id, username: user.username, avatar: user.avatar,
             accessToken: access_token, refreshToken: refresh_token, guilds: guilds,
         }, { merge: true });
-
+        
+        // ★★★★★ ここからが修正箇所です ★★★★★
         let sessionRole: 'owner' | 'tester' | 'supporter';
-        sessionRole = roleIntent;
 
         if (roleIntent === 'owner') {
             const userDoc = await userRef.get();
-            const userData = userDoc.exists ? userDoc.data() : null;
-            const isPaidUser = userData?.subscriptionStatus === 'active' && (!userData?.expiresAt || new Date(userData.expiresAt) >= new Date());
-
-            if (!isPaidUser) {
-                return res.redirect(`${frontendLoginUrl}?error=no_permission_for_owner`);
+            if (hasActiveSubscription(userDoc.data())) {
+                sessionRole = 'owner';
+            } else {
+                // 課金していない場合は、一時的にサポーターとしてトークンを発行
+                sessionRole = 'supporter';
             }
+        } else {
+            sessionRole = roleIntent;
         }
 
         const appToken = jwt.sign(
@@ -94,13 +114,13 @@ router.get('/discord/callback', async (req: Request, res: Response) => {
                 id: user.id,
                 username: user.username,
                 avatar: user.avatar,
-                role: sessionRole
+                role: sessionRole // 検証済みの役割をトークンに含める
             },
             process.env.DISCORD_CLIENT_SECRET!,
             { expiresIn: '7d' }
         );
+        // ★★★★★ ここまで ★★★★★
 
-        // フロントエンドへのリダイレクト時に、redirectPathもクエリパラメータとして渡す
         const finalRedirectPath = redirectPath || '/servers';
         res.redirect(`${process.env.FRONTEND_URL}/auth/callback?token=${appToken}&role_intent=${roleIntent}&redirectPath=${encodeURIComponent(finalRedirectPath)}`);
 
@@ -109,68 +129,41 @@ router.get('/discord/callback', async (req: Request, res: Response) => {
         res.redirect(`${frontendLoginUrl}?error=authentication_failed`);
     }
 });
-// ★★★★★ ここまで ★★★★★
 
 router.get('/status', protect, async (req: AuthRequest, res: Response) => {
-    // --- ★★★ ここからデバッグログを追加 ★★★ ---
-    console.log("[AUTH DEBUG] /status endpoint hit.");
     try {
         const userId = req.user.id;
         const tokenRole = req.user.role;
-        console.log(`[AUTH DEBUG] Token received for user: ${userId}, with role: ${tokenRole}`);
 
         if (!userId) {
-            console.log("[AUTH DEBUG] No user ID found in token. Responding with 'supporter'.");
-            return res.status(401).json({ role: 'supporter' }); // 認証情報がないので401を返すのが適切
+            return res.status(401).json({ role: 'supporter' });
         }
 
         if (tokenRole === 'tester') {
-            console.log("[AUTH DEBUG] Role is 'tester'. Responding with 'tester'.");
             return res.status(200).json({ role: 'tester' });
         }
 
         if (tokenRole === 'supporter') {
-            console.log("[AUTH DEBUG] Role is 'supporter'. Responding with 'supporter'.");
             return res.status(200).json({ role: 'supporter' });
         }
 
         if (tokenRole === 'owner') {
-            console.log("[AUTH DEBUG] Role is 'owner'. Checking subscription status in Firestore...");
             const userRef = db.collection('users').doc(userId);
             const userDoc = await userRef.get();
-
-            if (!userDoc.exists) {
-                console.log("[AUTH DEBUG] User document not found in Firestore. Responding with 'supporter'.");
-                return res.status(200).json({ role: 'supporter' });
-            }
-
-            const userData = userDoc.data();
-            const status = userData?.subscriptionStatus;
-            const expiresAt = userData?.expiresAt;
-            console.log(`[AUTH DEBUG] Firestore data: status=${status}, expiresAt=${expiresAt}`);
-
-            if (status === 'active') {
-                if (expiresAt && new Date(expiresAt) < new Date()) {
-                    console.log("[AUTH DEBUG] Subscription is expired. Responding with 'supporter'.");
-                    return res.status(200).json({ role: 'supporter' });
-                } else {
-                    console.log("[AUTH DEBUG] Subscription is active. Responding with 'owner'.");
-                    return res.status(200).json({ role: 'owner' });
-                }
+            
+            if (hasActiveSubscription(userDoc.data())) {
+                return res.status(200).json({ role: 'owner' });
             } else {
-                console.log("[AUTH DEBUG] Subscription status is not 'active'. Responding with 'supporter'.");
                 return res.status(200).json({ role: 'supporter' });
             }
         }
 
-        console.log(`[AUTH DEBUG] Role '${tokenRole}' did not match any condition. Responding with 'supporter'.`);
         res.status(200).json({ role: 'supporter' });
 
     } catch (error) {
-        console.error("[AUTH DEBUG] !!! An error occurred in /status endpoint !!!", error);
+        console.error("[AUTH DEBUG] !!! エラーが発生しました !!!", error);
         res.status(500).json({ error: 'Failed to fetch status' });
     }
-    // --- ★★★ ここまでデバッグログを追加 ★★★ ---
 });
 
 export default router;

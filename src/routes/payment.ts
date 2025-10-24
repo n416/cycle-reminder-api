@@ -105,8 +105,6 @@ router.post('/create-session', protect, async (req: AuthRequest, res) => {
       { auth: { username: KOMOJU_API_SECRET_KEY, password: '' } }
     );
     
-    // ここでは 'pending' にしない
-
     res.status(200).json({ sessionUrl: response.data.session_url });
   } catch (error: any) {
     console.error('!!! An unexpected error occurred while creating Komoju session !!!');
@@ -118,6 +116,34 @@ router.post('/create-session', protect, async (req: AuthRequest, res) => {
     res.status(500).json({ error: '決済セッションの作成中に予期せぬエラーが発生しました。時間をおいて再度お試しください。' });
   }
 });
+
+router.get('/session-status/:sessionId', protect, async (req: AuthRequest, res) => {
+  const { sessionId } = req.params;
+
+  if (!sessionId) {
+    return res.status(400).json({ error: 'Session ID is required.' });
+  }
+
+  try {
+    const response = await axios.get(
+      `${KOMOJU_API_BASE_URL}/sessions/${sessionId}`,
+      { auth: { username: KOMOJU_API_SECRET_KEY, password: '' } }
+    );
+    
+    const sessionData = response.data;
+    const paymentStatus = sessionData.payment?.status;
+
+    res.status(200).json({
+      status: sessionData.status,
+      paymentStatus: paymentStatus,
+    });
+
+  } catch (error: any) {
+    console.error(`!!! Failed to fetch Komoju session status for ${sessionId} !!!`, error.message);
+    res.status(500).json({ error: 'Failed to fetch session status.' });
+  }
+});
+
 
 router.post('/cancel-pending', protect, async (req: AuthRequest, res) => {
     const userId = req.user.id;
@@ -154,6 +180,7 @@ router.post('/webhook', async (req: Request & { rawBody?: Buffer }, res) => {
   console.log(`--- Received webhook event: ${event.type} ---`);
   console.log(JSON.stringify(event.data, null, 2));
 
+  // ★★★★★ ここからが修正箇所です ★★★★★
   if (event.type === 'payment.authorized') {
     const payment = event.data;
     const { user_id } = payment.metadata;
@@ -170,6 +197,7 @@ router.post('/webhook', async (req: Request & { rawBody?: Buffer }, res) => {
       }
     }
   } else if (event.type === 'payment.captured') {
+  // ★★★★★ ここまで ★★★★★
     const payment = event.data;
     const { user_id, plan_id } = payment.metadata;
 
@@ -182,7 +210,7 @@ router.post('/webhook', async (req: Request & { rawBody?: Buffer }, res) => {
           await userRef.set({
             subscriptionStatus: 'active',
             komojuCustomerId: payment.customer, 
-            pendingSince: null,
+            pendingSince: null, // pending状態を解除
           }, { merge: true });
           console.log(`!!! Subscription status updated for user ${user_id} via payment.captured !!!`);
         } else {
@@ -191,7 +219,7 @@ router.post('/webhook', async (req: Request & { rawBody?: Buffer }, res) => {
           await userRef.set({ 
               subscriptionStatus: 'active',
               expiresAt: expiresAt.toISOString(),
-              pendingSince: null,
+              pendingSince: null, // pending状態を解除
           }, { merge: true });
           console.log(`!!! Firestore write successful for user ${user_id} with one-time plan ${plan_id}. !!!`);
         }
@@ -217,16 +245,13 @@ router.post('/cancel-subscription', protect, async (req: AuthRequest, res) => {
             return res.status(200).json({ message: 'Tester mode deactivated.' });
         }
         
-        const { komojuSubscriptionId } = userData || {};
-        if (komojuSubscriptionId) {
-            await axios.delete(`${KOMOJU_API_BASE_URL}/subscriptions/${komojuSubscriptionId}`, {
-                auth: { username: KOMOJU_API_SECRET_KEY, password: '' }
-            });
-        }
-        
-        await userRef.set({ subscriptionStatus: 'inactive' }, { merge: true });
-        res.status(200).json({ message: 'Subscription cancelled.' });
+        await userRef.set({ 
+            subscriptionStatus: 'inactive'
+        }, { merge: true });
+
+        res.status(200).json({ message: 'Subscription status has been set to inactive.' });
     } catch (error: any) {
+        console.error('Failed to update subscription status to inactive:', error);
         res.status(500).json({ error: 'Failed to cancel.' });
     }
 });
