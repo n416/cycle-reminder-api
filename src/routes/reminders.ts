@@ -113,7 +113,8 @@ router.get('/:serverId', protect, async (req: AuthRequest, res) => {
   try {
     const { serverId } = req.params;
     const snapshot = await remindersCollection.where('serverId', '==', serverId).get();
-    const reminders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const reminders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Reminder));
+    reminders.sort((a, b) => (a.order ?? 9999) - (b.order ?? 9999));
     res.status(200).json(reminders);
   } catch (error) {
     console.error("Failed to fetch reminders:", error);
@@ -344,6 +345,25 @@ router.post('/:serverId/test-send', protect, protectWrite, async (req: AuthReque
   } catch (error) {
     console.error("!!! [Test Send - ERROR] An error occurred during test send:", error);
     res.status(500).json({ error: 'Failed to send test message' });
+  }
+});
+
+
+router.put('/:serverId/reorder', protect, protectWrite, async (req: AuthRequest, res) => {
+  try {
+    const { reminders } = req.body; // { id, order }[]
+    const batch = db.batch();
+    
+    reminders.forEach((item: any) => {
+        const ref = remindersCollection.doc(item.id);
+        batch.update(ref, { order: item.order });
+    });
+    
+    await batch.commit();
+    res.status(200).json({ message: 'Order updated' });
+  } catch (error) {
+    console.error("Failed to reorder reminders:", error);
+    res.status(500).json({ error: 'Failed to reorder reminders' });
   }
 });
 
