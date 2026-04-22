@@ -191,14 +191,14 @@ serversRouter.post('/:serverId/verify-password', protect, async (c) => {
         const isAppTester = appRole === 'tester';
 
         if (hasOwnerRights || isAppTester) {
-            const writeToken = await sign({ userId, serverId, grant: 'write', exp: Math.floor(Date.now() / 1000) + 3600 }, c.env.DISCORD_CLIENT_SECRET);
+            const writeToken = await sign({ userId, serverId, grant: 'write', exp: Math.floor(Date.now() / 1000) + 86400 }, c.env.DISCORD_CLIENT_SECRET);
             return c.json({ writeToken });
         }
 
         const serverData = await db.select().from(schema.servers).where(eq(schema.servers.id, serverId)).get();
 
         if (!serverData || !serverData.passwordHash) {
-            const writeToken = await sign({ userId, serverId, grant: 'write', exp: Math.floor(Date.now() / 1000) + 3600 }, c.env.DISCORD_CLIENT_SECRET);
+            const writeToken = await sign({ userId, serverId, grant: 'write', exp: Math.floor(Date.now() / 1000) + 86400 }, c.env.DISCORD_CLIENT_SECRET);
             return c.json({ writeToken });
         }
 
@@ -211,7 +211,7 @@ serversRouter.post('/:serverId/verify-password', protect, async (c) => {
             return c.json({ message: 'Invalid password.' }, 403);
         }
 
-        const writeToken = await sign({ userId, serverId, grant: 'write', exp: Math.floor(Date.now() / 1000) + 3600 }, c.env.DISCORD_CLIENT_SECRET);
+        const writeToken = await sign({ userId, serverId, grant: 'write', exp: Math.floor(Date.now() / 1000) + 86400 }, c.env.DISCORD_CLIENT_SECRET);
         return c.json({ writeToken });
 
     } catch (error: any) {
