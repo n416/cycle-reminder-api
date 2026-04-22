@@ -25,17 +25,21 @@ const calculateNextNotificationInfo = (
     const startDate = new Date(reminderData.startTime);
     if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null };
   
+    // 秒の誤差で「過去」と判定されないよう、現在時刻の秒数を切り捨てる
+    const baseTimeForComparison = new Date(baseTime);
+    baseTimeForComparison.setSeconds(0, 0);
+
     let nextCycleTime: Date | null = null;
   
     switch (reminderData.recurrence.type) {
       case 'none':
-        nextCycleTime = startDate >= baseTime ? startDate : null;
+        nextCycleTime = startDate >= baseTimeForComparison ? startDate : null;
         break;
   
       case 'daily': {
-        let nextDate = baseTime > startDate ? new Date(baseTime) : new Date(startDate);
+        let nextDate = baseTimeForComparison > startDate ? new Date(baseTimeForComparison) : new Date(startDate);
         nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
-        if (nextDate <= baseTime) {
+        if (nextDate <= baseTimeForComparison) {
           nextDate.setDate(nextDate.getDate() + 1);
         }
         nextCycleTime = nextDate;
@@ -44,7 +48,7 @@ const calculateNextNotificationInfo = (
   
       case 'interval': {
         let nextDate = new Date(startDate);
-        while (nextDate <= baseTime) {
+        while (nextDate <= baseTimeForComparison) {
           nextDate.setHours(nextDate.getHours() + reminderData.recurrence.hours);
         }
         nextCycleTime = nextDate;
@@ -58,9 +62,9 @@ const calculateNextNotificationInfo = (
           nextCycleTime = null;
           break;
         }
-        let nextDate = baseTime > startDate ? new Date(baseTime) : new Date(startDate);
+        let nextDate = baseTimeForComparison > startDate ? new Date(baseTimeForComparison) : new Date(startDate);
         nextDate.setHours(startDate.getHours(), startDate.getMinutes(), 0, 0);
-        if (nextDate <= baseTime) {
+        if (nextDate <= baseTimeForComparison) {
           nextDate.setDate(nextDate.getDate() + 1);
         }
         for (let i = 0; i < 7; i++) {
@@ -86,7 +90,7 @@ const calculateNextNotificationInfo = (
       const offsetMinutes = offsets[i];
       const notificationTime = new Date(nextCycleTime.getTime() - offsetMinutes * 60 * 1000);
   
-      if (notificationTime > baseTime) {
+      if (notificationTime >= baseTimeForComparison) {
         return {
           nextNotificationTime: notificationTime.toISOString(),
           nextOffsetIndex: i
