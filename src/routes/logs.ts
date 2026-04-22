@@ -1,23 +1,27 @@
-import { Router } from 'express';
-import { db } from '../config/firebase';
+import { Hono } from 'hono';
+import { HonoEnv } from '../hono';
 import { protect } from '../middleware/auth';
+import { drizzle } from 'drizzle-orm/d1';
+import * as schema from '../db/schema';
+import { eq, desc } from 'drizzle-orm';
 
-const router = Router();
+const logsRouter = new Hono<HonoEnv>();
 
-// GET /api/logs/:serverId - 特定サーバーのログを取得 (新しい順)
-router.get('/:serverId', protect, async (req, res) => {
+logsRouter.get('/:serverId', protect, async (c) => {
   try {
-    const { serverId } = req.params;
-    const snapshot = await db.collection('auditLogs')
-      .where('serverId', '==', serverId) // serverIdでフィルタリング
-      .orderBy('timestamp', 'desc')
-      .get();
-    const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    res.status(200).json(logs);
+    const serverId = c.req.param('serverId');
+    const db = drizzle(c.env.DB, { schema });
+    
+    const logs = await db.select()
+      .from(schema.auditLogs)
+      .where(eq(schema.auditLogs.serverId, serverId))
+      .orderBy(desc(schema.auditLogs.timestamp));
+      
+    return c.json(logs);
   } catch (error) {
     console.error('Failed to fetch audit logs:', error);
-    res.status(500).json({ error: 'Failed to fetch audit logs' });
+    return c.json({ error: 'Failed to fetch audit logs' }, 500);
   }
 });
 
-export default router;
+export default logsRouter;

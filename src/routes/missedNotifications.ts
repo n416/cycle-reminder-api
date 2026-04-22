@@ -1,43 +1,46 @@
-import { Router } from 'express';
-import { db } from '../config/firebase';
-import { protect, AuthRequest } from '../middleware/auth';
+import { Hono } from 'hono';
+import { HonoEnv } from '../hono';
+import { protect } from '../middleware/auth';
+import { drizzle } from 'drizzle-orm/d1';
+import * as schema from '../db/schema';
+import { eq, and, desc } from 'drizzle-orm';
 
-const router = Router();
-const missedNotificationsCollection = db.collection('missedNotifications');
+const missedNotificationsRouter = new Hono<HonoEnv>();
 
-// GET /api/missed-notifications/:serverId - 未確認の失敗ログを取得
-router.get('/:serverId', protect, async (req: AuthRequest, res) => {
+missedNotificationsRouter.get('/:serverId', protect, async (c) => {
   try {
-    const { serverId } = req.params;
-    const snapshot = await missedNotificationsCollection
-      .where('serverId', '==', serverId)
-      .where('acknowledged', '==', false) // 未確認のものだけ取得
-      .orderBy('missedAt', 'desc')
-      .get();
+    const serverId = c.req.param('serverId');
+    const db = drizzle(c.env.DB, { schema });
     
-    const notifications = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    res.status(200).json(notifications);
+    const notifications = await db.select()
+      .from(schema.missedNotifications)
+      .where(and(
+          eq(schema.missedNotifications.serverId, serverId),
+          eq(schema.missedNotifications.acknowledged, false)
+      ))
+      .orderBy(desc(schema.missedNotifications.missedAt));
+      
+    return c.json(notifications);
   } catch (error) {
     console.error('Failed to fetch missed notifications:', error);
-    res.status(500).json({ error: 'Failed to fetch missed notifications' });
+    return c.json({ error: 'Failed to fetch missed notifications' }, 500);
   }
 });
 
-// PUT /api/missed-notifications/:id/acknowledge - 失敗ログを確認済みにする
-router.put('/:id/acknowledge', protect, async (req: AuthRequest, res) => {
+missedNotificationsRouter.put('/:id/acknowledge', protect, async (c) => {
     try {
-      const { id } = req.params;
-      const docRef = missedNotificationsCollection.doc(id);
+      const id = parseInt(c.req.param('id'), 10);
+      const db = drizzle(c.env.DB, { schema });
       
-      // ここでユーザーが本当にこのサーバーの管理者かどうかの権限チェックを入れるのがより堅牢
-      // (今回は省略)
-
-      await docRef.update({ acknowledged: true });
-      res.status(200).json({ message: 'Notification acknowledged successfully.' });
+      await db.update(schema.missedNotifications)
+        .set({ acknowledged: true })
+        .where(eq(schema.missedNotifications.id, id));
+        
+      return c.json({ message: 'Notification acknowledged successfully.' });
     } catch (error) {
       console.error('Failed to acknowledge notification:', error);
-      res.status(500).json({ error: 'Failed to acknowledge notification' });
+      return c.json({ error: 'Failed to acknowledge notification' }, 500);
     }
-  });
+});
 
-export default router;
+export default missedNotificationsRouter;

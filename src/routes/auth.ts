@@ -1,169 +1,212 @@
-import { Router, Request, Response } from 'express';
-import axios from 'axios';
-import jwt from 'jsonwebtoken';
-import dotenv from 'dotenv';
-import { db } from '../config/firebase';
-import { protect, AuthRequest } from '../middleware/auth';
-import { DocumentData } from 'firebase-admin/firestore';
+import { Hono } from 'hono';
+import { HonoEnv } from '../hono';
+import { drizzle } from 'drizzle-orm/d1';
+import { sign, verify } from 'hono/jwt';
+import * as schema from '../db/schema';
+import { eq } from 'drizzle-orm';
 
-dotenv.config();
-const router = Router();
+const authRouter = new Hono<HonoEnv>();
 
-const TESTER_PASSWORD = process.env.TESTER_PASSWORD;
-if (!TESTER_PASSWORD) {
-    console.warn("Warning: TESTER_PASSWORD is not set. Tester login will be disabled.");
-}
-
-const hasActiveSubscription = (userData: DocumentData | null | undefined): boolean => {
-    if (!userData) {
-        return false;
+const hasActiveSubscription = (userData: typeof schema.users.$inferSelect | undefined): boolean => {
+    if (!userData) return false;
+    if (userData.subscriptionStatus !== 'active') return false;
+    if (userData.expiresAt) {
+        if (new Date(userData.expiresAt) < new Date()) return false;
     }
-    const status = userData.subscriptionStatus;
-    const expiresAt = userData.expiresAt;
-
-    if (status !== 'active') {
-        return false;
-    }
-
-    if (expiresAt) {
-        if (new Date(expiresAt) < new Date()) {
-            return false;
-        }
-    }
-    
     return true;
 };
 
-router.post('/verify-tester', (req: Request, res: Response) => {
-    const { password } = req.body;
-    if (!TESTER_PASSWORD || password !== TESTER_PASSWORD) {
-        return res.status(401).json({ message: 'Invalid tester password.' });
+// --- DEV AUTH BYPASS (開発環境専用ログイン) ---
+authRouter.post('/dev-login', async (c) => {
+    // ローカル開発環境以外からのアクセスはブロック
+    const isDev = c.env.NODE_ENV === 'development' || 
+                  c.env.FRONTEND_URL?.includes('localhost') || 
+                  c.env.FRONTEND_URL?.includes('127.0.0.1');
+                  
+    if (!isDev) {
+        return c.json({ error: 'This endpoint is only available in development mode.' }, 403);
     }
-    res.status(200).json({ message: 'Tester password verified.' });
+
+    const db = drizzle(c.env.DB, { schema });
+    const mockUserId = '999999999999999999';
+    
+    // モックのギルドデータ（Devサーバーを想定）
+    const mockGuilds = [
+        { id: 'dev_server_1', name: 'Dev Server 1', icon: null, permissions: '2147483647' } // 管理者権限
+    ];
+
+    await db.insert(schema.users).values({
+        id: mockUserId,
+        username: 'DevUser',
+        avatar: null,
+        accessToken: 'mock_access_token',
+        refreshToken: 'mock_refresh_token',
+        guilds: mockGuilds as any,
+        subscriptionStatus: 'active', // オーナー権限にするため
+    }).onConflictDoUpdate({
+        target: schema.users.id,
+        set: { guilds: mockGuilds as any, subscriptionStatus: 'active' }
+    });
+
+    // モックのサーバー設定も追加しておく（チャンネルの表示テスト用）
+    await db.insert(schema.servers).values({
+        id: 'dev_server_1',
+        channels: [{ id: 'dev_channel_1', name: '#general' }] as any,
+        channelsFetchedAt: Date.now(),
+        serverType: 'normal'
+    }).onConflictDoNothing();
+
+    const appToken = await sign({
+        id: mockUserId,
+        username: 'DevUser',
+        avatar: null,
+        role: 'owner', // 開発時は無条件でオーナー権限
+        exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 // 7 days
+    }, c.env.DISCORD_CLIENT_SECRET);
+
+    return c.json({ token: appToken, role: 'owner' });
 });
 
-router.get('/discord', (req: Request, res: Response) => {
-    const { role, redirectPath } = req.query;
+
+authRouter.post('/verify-tester', async (c) => {
+    const { password } = await c.req.json();
+    if (!c.env.TESTER_PASSWORD || password !== c.env.TESTER_PASSWORD) {
+        return c.json({ message: 'Invalid tester password.' }, 401);
+    }
+    return c.json({ message: 'Tester password verified.' }, 200);
+});
+
+authRouter.get('/discord', (c) => {
+    const role = c.req.query('role');
+    const redirectPath = c.req.query('redirectPath');
     if (role !== 'owner' && role !== 'supporter' && role !== 'tester') {
-        return res.status(400).send('Invalid role specified.');
+        return c.text('Invalid role specified.', 400);
     }
-    const state = Buffer.from(JSON.stringify({ role, redirectPath })).toString('base64');
-    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI!)}&response_type=code&scope=identify%20guilds&state=${state}`;
-    res.redirect(discordAuthUrl);
+    
+    // btoa is available in workers
+    const stateObj = JSON.stringify({ role, redirectPath });
+    const state = btoa(encodeURIComponent(stateObj)); 
+    
+    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${c.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(c.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify%20guilds&state=${state}`;
+    return c.redirect(discordAuthUrl);
 });
 
-router.get('/discord/callback', async (req: Request, res: Response) => {
-    const { code, error, state } = req.query;
-    const frontendLoginUrl = `${process.env.FRONTEND_URL}/login`;
+authRouter.get('/discord/callback', async (c) => {
+    const code = c.req.query('code');
+    const error = c.req.query('error');
+    const state = c.req.query('state');
+    const frontendLoginUrl = `${c.env.FRONTEND_URL}/login`;
 
     if (error === 'access_denied' || !code || !state) {
-        return res.redirect(frontendLoginUrl);
+        return c.redirect(frontendLoginUrl);
     }
 
     let roleIntent: 'owner' | 'supporter' | 'tester';
     let redirectPath: string | undefined;
     try {
-        const decodedState = JSON.parse(Buffer.from(state as string, 'base64').toString('utf-8'));
+        const decodedState = JSON.parse(decodeURIComponent(atob(state)));
         roleIntent = decodedState.role;
         redirectPath = decodedState.redirectPath;
     } catch (e) {
-        return res.redirect(`${frontendLoginUrl}?error=invalid_state`);
+        return c.redirect(`${frontendLoginUrl}?error=invalid_state`);
     }
 
     try {
-        const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', new URLSearchParams({
-            client_id: process.env.DISCORD_CLIENT_ID!,
-            client_secret: process.env.DISCORD_CLIENT_SECRET!,
-            grant_type: 'authorization_code',
-            code: code as string,
-            redirect_uri: process.env.DISCORD_REDIRECT_URI!,
-        }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+        const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
+            method: 'POST',
+            body: new URLSearchParams({
+                client_id: c.env.DISCORD_CLIENT_ID,
+                client_secret: c.env.DISCORD_CLIENT_SECRET,
+                grant_type: 'authorization_code',
+                code: code,
+                redirect_uri: c.env.DISCORD_REDIRECT_URI,
+            }),
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        });
+        
+        if (!tokenResponse.ok) throw new Error('Failed to get token');
+        const tokenData: any = await tokenResponse.json();
+        const { access_token, refresh_token } = tokenData;
 
-        const { access_token, refresh_token } = tokenResponse.data;
         const [userResponse, guildsResponse] = await Promise.all([
-            axios.get('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${access_token}` } }),
-            axios.get('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${access_token}` } })
+            fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${access_token}` } }),
+            fetch('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${access_token}` } })
         ]);
 
-        const user = userResponse.data;
-        const guilds = guildsResponse.data;
-        const userRef = db.collection('users').doc(user.id);
+        const user: any = await userResponse.json();
+        const guilds: any = await guildsResponse.json();
 
-        await userRef.set({
+        const db = drizzle(c.env.DB, { schema });
+
+        const existingUser = await db.select().from(schema.users).where(eq(schema.users.id, user.id)).get();
+
+        await db.insert(schema.users).values({
             id: user.id, username: user.username, avatar: user.avatar,
-            accessToken: access_token, refreshToken: refresh_token, guilds: guilds,
-        }, { merge: true });
+            accessToken: access_token, refreshToken: refresh_token, guilds: guilds as any,
+        }).onConflictDoUpdate({
+            target: schema.users.id,
+            set: { username: user.username, avatar: user.avatar, accessToken: access_token, refreshToken: refresh_token, guilds: guilds as any }
+        });
         
-        // ★★★★★ ここからが修正箇所です ★★★★★
         let sessionRole: 'owner' | 'tester' | 'supporter';
 
         if (roleIntent === 'owner') {
-            const userDoc = await userRef.get();
-            if (hasActiveSubscription(userDoc.data())) {
+            if (existingUser && hasActiveSubscription(existingUser)) {
                 sessionRole = 'owner';
             } else {
-                // 課金していない場合は、一時的にサポーターとしてトークンを発行
                 sessionRole = 'supporter';
             }
         } else {
             sessionRole = roleIntent;
         }
 
-        const appToken = jwt.sign(
-            {
-                id: user.id,
-                username: user.username,
-                avatar: user.avatar,
-                role: sessionRole // 検証済みの役割をトークンに含める
-            },
-            process.env.DISCORD_CLIENT_SECRET!,
-            { expiresIn: '7d' }
-        );
-        // ★★★★★ ここまで ★★★★★
+        const appToken = await sign({
+            id: user.id,
+            username: user.username,
+            avatar: user.avatar,
+            role: sessionRole,
+            exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7
+        }, c.env.DISCORD_CLIENT_SECRET);
 
         const finalRedirectPath = redirectPath || '/servers';
-        res.redirect(`${process.env.FRONTEND_URL}/auth/callback?token=${appToken}&role_intent=${roleIntent}&redirectPath=${encodeURIComponent(finalRedirectPath)}`);
+        return c.redirect(`${c.env.FRONTEND_URL}/auth/callback?token=${appToken}&role_intent=${roleIntent}&redirectPath=${encodeURIComponent(finalRedirectPath)}`);
 
     } catch (e: any) {
-        console.error("【バックエンド】Discord認証コールバックでエラー:", e.response?.data || e.message);
-        res.redirect(`${frontendLoginUrl}?error=authentication_failed`);
+        console.error("【バックエンド】Discord認証コールバックでエラー:", e);
+        return c.redirect(`${frontendLoginUrl}?error=authentication_failed`);
     }
 });
 
-router.get('/status', protect, async (req: AuthRequest, res: Response) => {
+authRouter.get('/status', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return c.json({ role: 'supporter' }, 401);
+    }
+    const token = authHeader.split(' ')[1];
+    
     try {
-        const userId = req.user.id;
-        const tokenRole = req.user.role;
+        const decodedPayload: any = await verify(token, c.env.DISCORD_CLIENT_SECRET, "HS256");
+        const userId = decodedPayload.id;
+        const tokenRole = decodedPayload.role;
 
-        if (!userId) {
-            return res.status(401).json({ role: 'supporter' });
-        }
-
-        if (tokenRole === 'tester') {
-            return res.status(200).json({ role: 'tester' });
-        }
-
-        if (tokenRole === 'supporter') {
-            return res.status(200).json({ role: 'supporter' });
+        if (tokenRole === 'tester' || tokenRole === 'supporter') {
+            return c.json({ role: tokenRole });
         }
 
         if (tokenRole === 'owner') {
-            const userRef = db.collection('users').doc(userId);
-            const userDoc = await userRef.get();
-            
-            if (hasActiveSubscription(userDoc.data())) {
-                return res.status(200).json({ role: 'owner' });
+            const db = drizzle(c.env.DB, { schema });
+            const user = await db.select().from(schema.users).where(eq(schema.users.id, userId)).get();
+            if (user && hasActiveSubscription(user)) {
+                return c.json({ role: 'owner' });
             } else {
-                return res.status(200).json({ role: 'supporter' });
+                return c.json({ role: 'supporter' });
             }
         }
 
-        res.status(200).json({ role: 'supporter' });
-
-    } catch (error) {
-        console.error("[AUTH DEBUG] !!! エラーが発生しました !!!", error);
-        res.status(500).json({ error: 'Failed to fetch status' });
+        return c.json({ role: 'supporter' });
+    } catch (e) {
+        return c.json({ role: 'supporter' }, 401);
     }
 });
 
-export default router;
+export default authRouter;

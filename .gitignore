@@ -14,6 +14,8 @@ dist-ssr
 .env
 serviceAccountKey.json
 
+# Cloudflare Wrangler
+.wrangler
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

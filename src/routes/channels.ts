@@ -1,50 +1,68 @@
-import { Router } from 'express';
-import { db } from '../config/firebase';
-import { protect, AuthRequest } from '../middleware/auth';
-import { client } from '../index';
-import { ChannelType } from 'discord.js';
+import { Hono } from 'hono';
+import { HonoEnv } from '../hono';
+import { protect } from '../middleware/auth';
+import { drizzle } from 'drizzle-orm/d1';
+import * as schema from '../db/schema';
+import { eq } from 'drizzle-orm';
 
-const router = Router({ mergeParams: true }); // ★ mergeParamsオプションを追加
+const channelsRouter = new Hono<HonoEnv>();
 
-const CACHE_DURATION = 10 * 60 * 1000; // 10分
+const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
-// GET /
-router.get('/', protect, async (req: AuthRequest, res) => { // ★ パスを'/'に変更
-  try {
-    const { serverId } = req.params; // ★ 親ルーターから serverId を受け取る
-    const forceRefresh = req.query['force-refresh'] === 'true';
-    const serverRef = db.collection('servers').doc(serverId);
-    const serverDoc = await serverRef.get();
-    const serverData = serverDoc.data();
+channelsRouter.get('/', protect, async (c) => {
+    try {
+        const serverId = c.req.param('serverId') as string;
+        const forceRefresh = c.req.query('force-refresh') === 'true';
+        
+        const db = drizzle(c.env.DB, { schema });
+        const serverDoc = await db.select().from(schema.servers).where(eq(schema.servers.id, serverId)).get();
 
-    if (!forceRefresh && serverData?.channels && serverData?.channelsFetchedAt) {
-      const lastFetched = serverData.channelsFetchedAt.toMillis();
-      if (Date.now() - lastFetched < CACHE_DURATION) {
-        return res.status(200).json(serverData.channels);
-      }
+        if (!forceRefresh && serverDoc && serverDoc.channels && serverDoc.channelsFetchedAt) {
+            const lastFetched = serverDoc.channelsFetchedAt;
+            if (Date.now() - lastFetched < CACHE_DURATION) {
+                return c.json(serverDoc.channels);
+            }
+        }
+
+        const isDev = c.env.NODE_ENV === 'development' || c.env.FRONTEND_URL?.includes('localhost') || c.env.FRONTEND_URL?.includes('127.0.0.1');
+        if (isDev && serverId === 'dev_server_1') {
+             return c.json([{ id: 'dev_channel_1', name: '#general' }, { id: 'dev_channel_2', name: '#test' }]);
+        }
+
+        // Fetch from Discord REST API
+        // 0 = GuildText
+        const res = await fetch(`https://discord.com/api/v10/guilds/${serverId}/channels`, {
+            headers: { Authorization: `Bot ${c.env.DISCORD_BOT_TOKEN}` }
+        });
+
+        if (!res.ok) {
+            if (res.status === 404 || res.status === 403) {
+                return c.json({ message: "Bot is not a member of this server." }, 404);
+            }
+            throw new Error(`Discord API error: ${res.status} ${res.statusText}`);
+        }
+
+        const channels: any[] = await res.json();
+        const textChannels = channels
+            .filter(channel => channel.type === 0)
+            .map(channel => ({ id: channel.id, name: `#${channel.name}` }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        await db.insert(schema.servers).values({
+            id: serverId,
+            channels: textChannels as any,
+            channelsFetchedAt: Date.now()
+        }).onConflictDoUpdate({
+            target: schema.servers.id,
+            set: { channels: textChannels as any, channelsFetchedAt: Date.now() }
+        });
+
+        return c.json(textChannels);
+
+    } catch (error: any) {
+        console.error('Failed to fetch channels:', error);
+        return c.json({ message: 'Failed to fetch channels' }, 500);
     }
-
-    const guild = await client.guilds.fetch(serverId);
-    if (!guild) {
-      return res.status(404).json({ message: "Bot is not a member of this server." });
-    }
-    const channels = await guild.channels.fetch();
-    const textChannels = channels
-      .filter(channel => channel?.type === ChannelType.GuildText)
-      .map(channel => ({ id: channel!.id, name: `#${channel!.name}` }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-
-    await serverRef.set({
-      channels: textChannels,
-      channelsFetchedAt: new Date(),
-    }, { merge: true });
-
-    res.status(200).json(textChannels);
-
-  } catch (error: any) {
-    console.error('Failed to fetch channels:', error.message);
-    res.status(500).json({ message: 'Failed to fetch channels' });
-  }
 });
 
-export default router;
+export default channelsRouter;

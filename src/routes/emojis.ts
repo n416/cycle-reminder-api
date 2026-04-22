@@ -1,79 +1,69 @@
-import { Router } from 'express';
-import { db } from '../config/firebase';
-import { protect, AuthRequest } from '../middleware/auth';
-import { client } from '../index';
+import { Hono } from 'hono';
+import { HonoEnv } from '../hono';
+import { protect } from '../middleware/auth';
+import { drizzle } from 'drizzle-orm/d1';
+import * as schema from '../db/schema';
+import { eq } from 'drizzle-orm';
 
-const router = Router({ mergeParams: true });
+const emojisRouter = new Hono<HonoEnv>();
 
 const CACHE_DURATION = 10 * 60 * 1000;
 
-router.get('/', protect, async (req: AuthRequest, res) => {
-  try {
-    const { serverId } = req.params;
-    const forceRefresh = req.query['force-refresh'] === 'true';
-    const serverRef = db.collection('servers').doc(serverId);
+emojisRouter.get('/', protect, async (c) => {
+    try {
+        const serverId = c.req.param('serverId') as string;
+        const forceRefresh = c.req.query('force-refresh') === 'true';
+        
+        const db = drizzle(c.env.DB, { schema });
+        const serverDoc = await db.select().from(schema.servers).where(eq(schema.servers.id, serverId)).get();
 
-    console.log(`%c[Emojis API] Request received for server: ${serverId}`, 'color: #f0a; font-weight: bold;');
-    console.log(`[Emojis API] Force refresh requested: ${forceRefresh}`);
-
-    if (!forceRefresh) {
-      const serverDoc = await serverRef.get();
-      const serverData = serverDoc.data();
-      if (serverData?.emojis && serverData?.emojisFetchedAt) {
-        const lastFetched = serverData.emojisFetchedAt.toMillis();
-        if (Date.now() - lastFetched < CACHE_DURATION) {
-          console.log('[Emojis API] Cache is valid. Serving from cache.');
-          return res.status(200).json(serverData.emojis);
+        if (!forceRefresh && serverDoc && serverDoc.emojis && serverDoc.emojisFetchedAt) {
+            const lastFetched = serverDoc.emojisFetchedAt;
+            if (Date.now() - lastFetched < CACHE_DURATION) {
+                return c.json(serverDoc.emojis);
+            }
         }
-        console.log('[Emojis API] Cache is expired.');
-      } else {
-        console.log('[Emojis API] No cache found.');
-      }
+
+        const isDev = c.env.NODE_ENV === 'development' || c.env.FRONTEND_URL?.includes('localhost') || c.env.FRONTEND_URL?.includes('127.0.0.1');
+        if (isDev && serverId === 'dev_server_1') {
+            return c.json([{ id: 'dev_emoji_1', name: 'dev_emoji', url: '', animated: false }]);
+        }
+
+        const res = await fetch(`https://discord.com/api/v10/guilds/${serverId}/emojis`, {
+            headers: { Authorization: `Bot ${c.env.DISCORD_BOT_TOKEN}` }
+        });
+
+        if (!res.ok) {
+            if (res.status === 404 || res.status === 403) {
+                 return c.json({ message: "Bot is not a member of this server." }, 404);
+            }
+            throw new Error(`Discord API error: ${res.status} ${res.statusText}`);
+        }
+
+        const emojisData: any[] = await res.json();
+        
+        const emojis = emojisData.map(emoji => ({
+            id: emoji.id,
+            name: emoji.name,
+            url: `https://cdn.discordapp.com/emojis/${emoji.id}.${emoji.animated ? 'gif' : 'png'}`,
+            animated: emoji.animated,
+        }));
+
+        await db.insert(schema.servers).values({
+            id: serverId,
+            emojis: emojis as any,
+            emojisFetchedAt: Date.now()
+        }).onConflictDoUpdate({
+            target: schema.servers.id,
+            set: { emojis: emojis as any, emojisFetchedAt: Date.now() }
+        });
+
+        return c.json(emojis);
+
+    } catch (error: any) {
+        console.error('Failed to fetch emojis:', error);
+        return c.json({ message: 'Failed to fetch emojis' }, 500);
     }
-
-    console.log('[Emojis API] Fetching guild object from Discord API...');
-    const guild = await client.guilds.fetch(serverId);
-    
-    // --- ★★★ ここから調査用ログを追加 ★★★ ---
-    console.log('[Emojis API] Guild object fetched. Inspecting properties...');
-    console.log(guild); // guildオブジェクトの中身をすべて表示
-
-    if (!guild) {
-      console.log('[Emojis API] Guild not found on Discord.');
-      return res.status(404).json({ message: "Bot is not a member of this server." });
-    }
-    
-    // emojisプロパティが存在するかどうかを安全にチェック
-    if (!guild.emojis) {
-        console.error('[Emojis API] FATAL: guild.emojis property is undefined! The fetched guild object is incomplete.');
-        return res.status(500).json({ message: 'Failed to access guild emojis. The guild object may be incomplete.' });
-    }
-    console.log('[Emojis API] guild.emojis property found. Proceeding to fetch emojis.');
-    // --- ★★★ ここまで追加 ★★★ ---
-    
-    const emojisCollection = await guild.emojis.fetch();
-    console.log(`[Emojis API] Found ${emojisCollection.size} emojis on Discord.`);
-
-    const emojis = emojisCollection.map(emoji => ({
-      id: emoji.id,
-      name: emoji.name,
-      url: emoji.url,
-      animated: emoji.animated,
-    }));
-
-    console.log('[Emojis API] Saving new data to cache...');
-    await serverRef.set({
-      emojis: emojis,
-      emojisFetchedAt: new Date(),
-    }, { merge: true });
-
-    console.log('[Emojis API] Sending response with new data.');
-    res.status(200).json(emojis);
-
-  } catch (error: any) {
-    console.error('Failed to fetch emojis:', error.message);
-    res.status(500).json({ message: 'Failed to fetch emojis' });
-  }
 });
 
-export default router;
+export default emojisRouter;
