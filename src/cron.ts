@@ -4,7 +4,7 @@ import { eq, and, lte, asc, inArray } from 'drizzle-orm';
 import { HonoEnv } from './hono';
 // Removed @discordjs/rest dependency
 
-const GRACE_PERIOD = 10 * 60 * 1000; // 10分
+const GRACE_PERIOD = 60 * 60 * 1000; // 60分
 
 const calculateNextNotificationAfterSend = (
   reminder: any
@@ -13,7 +13,11 @@ const calculateNextNotificationAfterSend = (
   const startDate = new Date(reminder.startTime);
   if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null, newStartTime: null };
 
-  const offsets = reminder.notificationOffsets || [0];
+  let offsets = reminder.notificationOffsets || [0];
+  if (typeof offsets === 'string') {
+    try { offsets = JSON.parse(offsets); } catch (e) { offsets = [0]; }
+  }
+
   const currentOffsetIndex = reminder.nextOffsetIndex || 0;
 
   const nextOffsetIndexInCycle = currentOffsetIndex + 1;
@@ -116,8 +120,10 @@ const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnTy
         const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
         const timeStr = `${jst.getUTCHours().toString().padStart(2, '0')}:${jst.getUTCMinutes().toString().padStart(2, '0')}`;
 
-        // メッセージ内のプレースホルダーを除去
-        const cleanMsg = (r.message || '').replace(/\{\{.*?\}\}/g, '').trim();
+        if (r.message && r.message.includes('{{all}}')) return null;
+
+        // メッセージ内のプレースホルダーと改行を除去
+        const cleanMsg = (r.message || '').replace(/\{\{.*?\}\}/g, '').replace(/\n/g, ' ').trim();
 
         // 通知オフセットの取得
         let offsets = r.notificationOffsets;
@@ -136,7 +142,7 @@ const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnTy
       if (!listStr) {
         listStr = '予定はありません';
       }
-      finalMessage = finalMessage.replace('{{all}}', `\n**--- 24時間以内の予定 ---**\n${listStr}`);
+      finalMessage = finalMessage.replace(/\{\{all\}\}/g, `\n**--- 24時間以内の予定 ---**\n${listStr}`);
     } else if (finalMessage.includes('{{offset}}')) {
       const offsets = reminder.notificationOffsets || [0];
       const currentOffset = offsets[reminder.nextOffsetIndex || 0];
@@ -151,6 +157,10 @@ const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnTy
     if (isDev && reminder.serverId === 'dev_server_1') {
       console.log(`[Scheduler] Dev Mode: Sent reminder ${reminder.id} to channel ${reminder.channelId}. Content: ${finalMessage}`);
       return;
+    }
+
+    if (finalMessage.length > 2000) {
+      finalMessage = finalMessage.substring(0, 1997) + '...';
     }
 
     const res = await fetch(`https://discord.com/api/v10/channels/${reminder.channelId}/messages`, {

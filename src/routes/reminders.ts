@@ -3,7 +3,7 @@ import { HonoEnv } from '../hono';
 import { protect, protectWrite } from '../middleware/auth';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '../db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, asc, lte } from 'drizzle-orm';
 // Removed @discordjs/rest dependency
 
 const remindersRouter = new Hono<HonoEnv>();
@@ -259,14 +259,50 @@ remindersRouter.post('/:serverId/test-send', protect, protectWrite, async (c) =>
             return c.json({ message: 'channelId and message are required.' }, 400);
         }
 
+        const db = drizzle(c.env.DB, { schema });
         let finalMessage = sanitizeMessage(message);
         
-        // Simple {{all}} expansion fallback for test (you may want to keep the full logic)
         if (finalMessage.includes('{{all}}')) {
-             finalMessage = finalMessage.replace('{{all}}', '\n**--- 24時間以内の予定 ---**\n(テスト送信のためリストは省略)');
+            const now = new Date();
+            const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
+
+            const upcomingReminders = await db.select().from(schema.reminders).where(
+              and(
+                eq(schema.reminders.serverId, serverId),
+                eq(schema.reminders.status, 'active'),
+                lte(schema.reminders.nextNotificationTime, in24Hours)
+              )
+            ).orderBy(asc(schema.reminders.nextNotificationTime));
+
+            let listStr = upcomingReminders.map(r => {
+              if (!r.nextNotificationTime) return null;
+              const d = new Date(r.nextNotificationTime);
+              const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+              const timeStr = `${jst.getUTCHours().toString().padStart(2, '0')}:${jst.getUTCMinutes().toString().padStart(2, '0')}`;
+
+              if (r.message && r.message.includes('{{all}}')) return null;
+
+              const cleanMsg = (r.message || '').replace(/\{\{.*?\}\}/g, '').replace(/\n/g, ' ').trim();
+              
+              let offsets = r.notificationOffsets;
+              if (typeof offsets === 'string') {
+                try { offsets = JSON.parse(offsets); } catch (e) { }
+              }
+              let offsetStr = '';
+              return `${timeStr} - ${cleanMsg}${offsetStr}`;
+            }).filter(Boolean).join('\n');
+
+            if (!listStr) {
+              listStr = '予定はありません';
+            }
+            finalMessage = finalMessage.replace(/\{\{all\}\}/g, `\n**--- 24時間以内の予定 ---**\n${listStr}`);
         }
 
-        const testMessage = `＝＝＝テスト送信です＝＝＝\n${finalMessage}`;
+        let testMessage = `＝＝＝テスト送信です＝＝＝\n${finalMessage}`;
+        
+        if (testMessage.length > 2000) {
+            testMessage = testMessage.substring(0, 1997) + '...';
+        }
 
         const isDev = c.env.NODE_ENV === 'development' || c.env.FRONTEND_URL?.includes('localhost') || c.env.FRONTEND_URL?.includes('127.0.0.1');
         if (isDev && serverId === 'dev_server_1') {
