@@ -262,7 +262,7 @@ remindersRouter.post('/:serverId/test-send', protect, protectWrite, async (c) =>
         const db = drizzle(c.env.DB, { schema });
         let finalMessage = sanitizeMessage(message);
         
-        if (finalMessage.includes('{{all}}')) {
+        if (/\{\{all\}\}/i.test(finalMessage)) {
             const now = new Date();
             const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
 
@@ -280,7 +280,7 @@ remindersRouter.post('/:serverId/test-send', protect, protectWrite, async (c) =>
               const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
               const timeStr = `${jst.getUTCHours().toString().padStart(2, '0')}:${jst.getUTCMinutes().toString().padStart(2, '0')}`;
 
-              if (r.message && r.message.includes('{{all}}')) return null;
+              if (r.message && /\{\{all\}\}/i.test(r.message)) return null;
 
               const cleanMsg = (r.message || '').replace(/\{\{.*?\}\}/g, '').replace(/\n/g, ' ').trim();
               
@@ -295,7 +295,7 @@ remindersRouter.post('/:serverId/test-send', protect, protectWrite, async (c) =>
             if (!listStr) {
               listStr = '予定はありません';
             }
-            finalMessage = finalMessage.replace(/\{\{all\}\}/g, `\n**--- 24時間以内の予定 ---**\n${listStr}`);
+            finalMessage = finalMessage.replace(/\{\{all\}\}/ig, `\n**--- 24時間以内の予定 ---**\n${listStr}`);
         }
 
         let testMessage = `＝＝＝テスト送信です＝＝＝\n${finalMessage}`;

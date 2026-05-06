@@ -100,7 +100,7 @@ const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnTy
   try {
     let finalMessage = sanitizeMessage(reminder.message);
 
-    if (finalMessage.includes('{{all}}')) {
+    if (/\{\{all\}\}/i.test(finalMessage)) {
       const now = new Date();
       const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
 
@@ -120,7 +120,7 @@ const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnTy
         const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
         const timeStr = `${jst.getUTCHours().toString().padStart(2, '0')}:${jst.getUTCMinutes().toString().padStart(2, '0')}`;
 
-        if (r.message && r.message.includes('{{all}}')) return null;
+        if (r.message && /\{\{all\}\}/i.test(r.message)) return null;
 
         // メッセージ内のプレースホルダーと改行を除去
         const cleanMsg = (r.message || '').replace(/\{\{.*?\}\}/g, '').replace(/\n/g, ' ').trim();
@@ -142,14 +142,14 @@ const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnTy
       if (!listStr) {
         listStr = '予定はありません';
       }
-      finalMessage = finalMessage.replace(/\{\{all\}\}/g, `\n**--- 24時間以内の予定 ---**\n${listStr}`);
-    } else if (finalMessage.includes('{{offset}}')) {
+      finalMessage = finalMessage.replace(/\{\{all\}\}/ig, `\n**--- 24時間以内の予定 ---**\n${listStr}`);
+    } else if (/\{\{offset\}\}/i.test(finalMessage)) {
       const offsets = reminder.notificationOffsets || [0];
       const currentOffset = offsets[reminder.nextOffsetIndex || 0];
       if (currentOffset > 0) {
-        finalMessage = finalMessage.replace('{{offset}}', `まであと ${currentOffset} 分`);
+        finalMessage = finalMessage.replace(/\{\{offset\}\}/ig, `まであと ${currentOffset} 分`);
       } else {
-        finalMessage = finalMessage.replace('{{offset}}', 'の時間です！');
+        finalMessage = finalMessage.replace(/\{\{offset\}\}/ig, 'の時間です！');
       }
     }
 
