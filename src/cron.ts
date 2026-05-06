@@ -96,9 +96,10 @@ const sanitizeMessage = (message: string): string => {
     .replace(/<@!?(\d+)>/g, '＠ユーザー');
 };
 
-const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnType<typeof drizzle>) => {
+const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnType<typeof drizzle>): Promise<boolean> => {
   try {
     let finalMessage = sanitizeMessage(reminder.message);
+    if (!finalMessage) return true;
 
     if (/\{\{all\}\}/i.test(finalMessage)) {
       const now = new Date();
@@ -116,7 +117,19 @@ const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnTy
       let listStr = upcomingReminders.map(r => {
         if (!r.nextNotificationTime) return null;
         // JSTに変換してフォーマット (HH:MM)
-        const d = new Date(r.nextNotificationTime);
+        let d = new Date(r.nextNotificationTime);
+        if (isNaN(d.getTime())) {
+          try {
+            const parsed = JSON.parse(r.nextNotificationTime);
+            if (parsed && parsed._seconds) {
+              d = new Date(parsed._seconds * 1000);
+            }
+          } catch (e) {
+            // parse failed
+          }
+        }
+        if (isNaN(d.getTime())) return null;
+
         const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
         const timeStr = `${jst.getUTCHours().toString().padStart(2, '0')}:${jst.getUTCMinutes().toString().padStart(2, '0')}`;
 
@@ -156,7 +169,7 @@ const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnTy
     const isDev = env.NODE_ENV === 'development' || env.FRONTEND_URL?.includes('localhost') || env.FRONTEND_URL?.includes('127.0.0.1');
     if (isDev && reminder.serverId === 'dev_server_1') {
       console.log(`[Scheduler] Dev Mode: Sent reminder ${reminder.id} to channel ${reminder.channelId}. Content: ${finalMessage}`);
-      return;
+      return true;
     }
 
     if (finalMessage.length > 2000) {
@@ -194,8 +207,10 @@ const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnTy
       }
     }
 
+    return true;
   } catch (error) {
     console.error(`[Scheduler] Failed to send message for reminder ${reminder.id}:`, error);
+    return false;
   }
 };
 
@@ -230,7 +245,20 @@ export const checkAndSendReminders = async (env: HonoEnv['Bindings'], db: Return
       const missedBy = now.getTime() - notificationTime.getTime();
 
       if (missedBy < GRACE_PERIOD) {
-        await sendMessage(env, reminder, db);
+        try {
+          const success = await sendMessage(env, reminder, db);
+          if (!success) {
+            await db.insert(schema.missedNotifications).values({
+              serverId: reminder.serverId,
+              reminderMessage: `[送信エラー] ${reminder.message}`,
+              missedAt: reminder.nextNotificationTime,
+              channelName: reminder.channel,
+              acknowledged: false
+            });
+          }
+        } catch (error) {
+          console.error(`[Cron] sendMessage threw an unexpected error for reminder ${reminder.id}:`, error);
+        }
       } else {
         console.warn(`[Cron] SKIPPED reminder "${reminder.message}" (too late)`);
         await db.insert(schema.missedNotifications).values({

@@ -201,6 +201,7 @@ remindersRouter.put('/:id', protect, protectWrite, async (c) => {
 
         const updatedData = {
             ...dataWithOffsets,
+            status: dataWithOffsets.status === 'processing' ? 'active' : dataWithOffsets.status,
             nextNotificationTime,
             nextOffsetIndex,
         };
@@ -276,7 +277,17 @@ remindersRouter.post('/:serverId/test-send', protect, protectWrite, async (c) =>
 
             let listStr = upcomingReminders.map(r => {
               if (!r.nextNotificationTime) return null;
-              const d = new Date(r.nextNotificationTime);
+              let d = new Date(r.nextNotificationTime);
+              if (isNaN(d.getTime())) {
+                try {
+                  const parsed = JSON.parse(r.nextNotificationTime);
+                  if (parsed && parsed._seconds) {
+                    d = new Date(parsed._seconds * 1000);
+                  }
+                } catch (e) {}
+              }
+              if (isNaN(d.getTime())) return null;
+
               const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
               const timeStr = `${jst.getUTCHours().toString().padStart(2, '0')}:${jst.getUTCMinutes().toString().padStart(2, '0')}`;
 
