@@ -1,6 +1,6 @@
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from './db/schema';
-import { eq, and, lte, asc, inArray } from 'drizzle-orm';
+import { eq, and, lte, asc, inArray, or } from 'drizzle-orm';
 import { HonoEnv } from './hono';
 // Removed @discordjs/rest dependency
 
@@ -220,10 +220,18 @@ export const checkAndSendReminders = async (env: HonoEnv['Bindings'], db: Return
     const now = new Date();
     const nowIso = now.toISOString();
 
+    const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
+
     // 1. D1から送信対象のリマインダーを取得
     const dueReminders = await db.select().from(schema.reminders).where(
       and(
-        eq(schema.reminders.status, 'active'),
+        or(
+          eq(schema.reminders.status, 'active'),
+          and(
+            eq(schema.reminders.status, 'processing'),
+            lte(schema.reminders.lockedAt, fiveMinutesAgo)
+          )
+        ),
         lte(schema.reminders.nextNotificationTime, nowIso)
       )
     );
@@ -238,7 +246,7 @@ export const checkAndSendReminders = async (env: HonoEnv['Bindings'], db: Return
     for (const reminder of dueReminders) {
       // Processing status update
       await db.update(schema.reminders)
-        .set({ status: 'processing' })
+        .set({ status: 'processing', lockedAt: nowIso })
         .where(eq(schema.reminders.id, reminder.id));
 
       const notificationTime = new Date(reminder.nextNotificationTime!);
@@ -272,7 +280,7 @@ export const checkAndSendReminders = async (env: HonoEnv['Bindings'], db: Return
 
       const { nextNotificationTime, nextOffsetIndex, newStartTime } = calculateNextNotificationAfterSend(reminder);
 
-      const updatePayload: any = {};
+      const updatePayload: any = { lockedAt: null };
       if (nextNotificationTime) {
         updatePayload.nextNotificationTime = nextNotificationTime;
         updatePayload.nextOffsetIndex = nextOffsetIndex;

@@ -15,6 +15,13 @@
       "when": 1776834402967,
       "tag": "0001_outgoing_mole_man",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1778130864989,
+      "tag": "0002_plain_diamondback",
+      "breakpoints": true
     }
   ]
 }

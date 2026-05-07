@@ -39,6 +39,7 @@ export const reminders = sqliteTable('reminders', {
   nextNotificationTime: text('nextNotificationTime'), // ISO8601 string
   nextOffsetIndex: integer('nextOffsetIndex'),
   order: integer('order'),
+  lockedAt: text('lockedAt'), // ISO8601 string
 });
 
 export const auditLogs = sqliteTable('audit_logs', {

@@ -202,6 +202,7 @@ remindersRouter.put('/:id', protect, protectWrite, async (c) => {
         const updatedData = {
             ...dataWithOffsets,
             status: dataWithOffsets.status === 'processing' ? 'active' : dataWithOffsets.status,
+            lockedAt: null,
             nextNotificationTime,
             nextOffsetIndex,
         };
