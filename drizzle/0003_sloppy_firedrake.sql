@@ -1,0 +1,1 @@
+ALTER TABLE `reminders` ADD `eventTime` text;

@@ -20,10 +20,10 @@ const addLogWithTrim = async (db: ReturnType<typeof drizzle>, logData: any) => {
 const calculateNextNotificationInfo = (
     reminderData: any,
     baseTime: Date
-  ): { nextNotificationTime: string | null; nextOffsetIndex: number | null } => {
+  ): { nextNotificationTime: string | null; nextOffsetIndex: number | null; eventTime: string | null } => {
   
     const startDate = new Date(reminderData.startTime);
-    if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null };
+    if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null, eventTime: null };
   
     // 秒の誤差で「過去」と判定されないよう、現在時刻の秒数を切り捨てる
     const baseTimeForComparison = new Date(baseTime);
@@ -81,7 +81,7 @@ const calculateNextNotificationInfo = (
     }
   
     if (!nextCycleTime) {
-      return { nextNotificationTime: null, nextOffsetIndex: null };
+      return { nextNotificationTime: null, nextOffsetIndex: null, eventTime: null };
     }
   
     const offsets = reminderData.notificationOffsets || [0];
@@ -93,12 +93,13 @@ const calculateNextNotificationInfo = (
       if (notificationTime >= baseTimeForComparison) {
         return {
           nextNotificationTime: notificationTime.toISOString(),
-          nextOffsetIndex: i
+          nextOffsetIndex: i,
+          eventTime: nextCycleTime.toISOString()
         };
       }
     }
   
-    return { nextNotificationTime: null, nextOffsetIndex: null };
+    return { nextNotificationTime: null, nextOffsetIndex: null, eventTime: null };
 };
 
 const sanitizeMessage = (message: string): string => {
@@ -145,7 +146,7 @@ remindersRouter.post('/:serverId', protect, protectWrite, async (c) => {
             notificationOffsets: offsets.length > 0 ? offsets : [0],
         };
 
-        const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(dataWithOffsets, new Date());
+        const { nextNotificationTime, nextOffsetIndex, eventTime } = calculateNextNotificationInfo(dataWithOffsets, new Date());
 
         const newId = crypto.randomUUID();
         const newReminderData = {
@@ -155,6 +156,7 @@ remindersRouter.post('/:serverId', protect, protectWrite, async (c) => {
             createdBy: c.get('user').id,
             nextNotificationTime: nextNotificationTime,
             nextOffsetIndex: nextOffsetIndex,
+            eventTime: eventTime,
             selectedEmojis: reminderData.selectedEmojis || [],
         };
 
@@ -197,7 +199,7 @@ remindersRouter.put('/:id', protect, protectWrite, async (c) => {
             selectedEmojis: updatedBody.selectedEmojis || [],
         };
 
-        const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(dataWithOffsets, new Date());
+        const { nextNotificationTime, nextOffsetIndex, eventTime } = calculateNextNotificationInfo(dataWithOffsets, new Date());
 
         const updatedData = {
             ...dataWithOffsets,
@@ -205,6 +207,7 @@ remindersRouter.put('/:id', protect, protectWrite, async (c) => {
             lockedAt: null,
             nextNotificationTime,
             nextOffsetIndex,
+            eventTime,
         };
 
         await db.update(schema.reminders).set(updatedData).where(eq(schema.reminders.id, id));
@@ -277,11 +280,11 @@ remindersRouter.post('/:serverId/test-send', protect, protectWrite, async (c) =>
             ).orderBy(asc(schema.reminders.nextNotificationTime));
 
             let listStr = upcomingReminders.map(r => {
-              if (!r.nextNotificationTime) return null;
-              let d = new Date(r.nextNotificationTime);
+              if (!r.eventTime) return null;
+              let d = new Date(r.eventTime);
               if (isNaN(d.getTime())) {
                 try {
-                  const parsed = JSON.parse(r.nextNotificationTime);
+                  const parsed = JSON.parse(r.eventTime);
                   if (parsed && parsed._seconds) {
                     d = new Date(parsed._seconds * 1000);
                   }
@@ -406,7 +409,7 @@ remindersRouter.post('/:serverId/daily-summary', protect, protectWrite, async (c
             hideNextTime: false,
         };
 
-        const { nextNotificationTime, nextOffsetIndex } = calculateNextNotificationInfo(reminderData, new Date());
+        const { nextNotificationTime, nextOffsetIndex, eventTime } = calculateNextNotificationInfo(reminderData, new Date());
 
         const newId = crypto.randomUUID();
         const newReminderData = {
@@ -415,6 +418,7 @@ remindersRouter.post('/:serverId/daily-summary', protect, protectWrite, async (c
             createdBy: c.get('user').id,
             nextNotificationTime: nextNotificationTime,
             nextOffsetIndex: nextOffsetIndex,
+            eventTime: eventTime,
         };
 
         const db = drizzle(c.env.DB, { schema });

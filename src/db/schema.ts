@@ -38,6 +38,7 @@ export const reminders = sqliteTable('reminders', {
   hideNextTime: integer('hideNextTime', { mode: 'boolean' }).default(false),
   nextNotificationTime: text('nextNotificationTime'), // ISO8601 string
   nextOffsetIndex: integer('nextOffsetIndex'),
+  eventTime: text('eventTime'), // ISO8601 string - actual time of the event
   order: integer('order'),
   lockedAt: text('lockedAt'), // ISO8601 string
 });

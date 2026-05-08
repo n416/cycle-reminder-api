@@ -8,10 +8,10 @@ const GRACE_PERIOD = 60 * 60 * 1000; // 60分
 
 const calculateNextNotificationAfterSend = (
   reminder: any
-): { nextNotificationTime: string | null; nextOffsetIndex: number | null; newStartTime: string | null } => {
+): { nextNotificationTime: string | null; nextOffsetIndex: number | null; newStartTime: string | null; eventTime: string | null } => {
 
   const startDate = new Date(reminder.startTime);
-  if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null, newStartTime: null };
+  if (isNaN(startDate.getTime())) return { nextNotificationTime: null, nextOffsetIndex: null, newStartTime: null, eventTime: null };
 
   let offsets = reminder.notificationOffsets || [0];
   if (typeof offsets === 'string') {
@@ -30,6 +30,7 @@ const calculateNextNotificationAfterSend = (
       nextNotificationTime: nextNotificationTime.toISOString(),
       nextOffsetIndex: nextOffsetIndexInCycle,
       newStartTime: null,
+      eventTime: currentCycleBaseTime.toISOString(),
     };
   }
 
@@ -75,7 +76,7 @@ const calculateNextNotificationAfterSend = (
   }
 
   if (!nextCycleTime) {
-    return { nextNotificationTime: null, nextOffsetIndex: null, newStartTime: null };
+    return { nextNotificationTime: null, nextOffsetIndex: null, newStartTime: null, eventTime: null };
   }
 
   const firstOffset = offsets[0] || 0;
@@ -85,6 +86,7 @@ const calculateNextNotificationAfterSend = (
     nextNotificationTime: nextNotificationTime.toISOString(),
     nextOffsetIndex: 0,
     newStartTime: lastCycleTime.toISOString(),
+    eventTime: nextCycleTime.toISOString(),
   };
 };
 
@@ -115,12 +117,12 @@ const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnTy
       ).orderBy(asc(schema.reminders.nextNotificationTime));
 
       let listStr = upcomingReminders.map(r => {
-        if (!r.nextNotificationTime) return null;
+        if (!r.eventTime) return null;
         // JSTに変換してフォーマット (HH:MM)
-        let d = new Date(r.nextNotificationTime);
+        let d = new Date(r.eventTime);
         if (isNaN(d.getTime())) {
           try {
-            const parsed = JSON.parse(r.nextNotificationTime);
+            const parsed = JSON.parse(r.eventTime);
             if (parsed && parsed._seconds) {
               d = new Date(parsed._seconds * 1000);
             }
@@ -278,12 +280,13 @@ export const checkAndSendReminders = async (env: HonoEnv['Bindings'], db: Return
         });
       }
 
-      const { nextNotificationTime, nextOffsetIndex, newStartTime } = calculateNextNotificationAfterSend(reminder);
+      const { nextNotificationTime, nextOffsetIndex, newStartTime, eventTime } = calculateNextNotificationAfterSend(reminder);
 
       const updatePayload: any = { lockedAt: null };
       if (nextNotificationTime) {
         updatePayload.nextNotificationTime = nextNotificationTime;
         updatePayload.nextOffsetIndex = nextOffsetIndex;
+        updatePayload.eventTime = eventTime;
         updatePayload.status = 'active';
         if (newStartTime) {
           updatePayload.startTime = newStartTime;
@@ -291,6 +294,7 @@ export const checkAndSendReminders = async (env: HonoEnv['Bindings'], db: Return
       } else {
         updatePayload.nextNotificationTime = null;
         updatePayload.nextOffsetIndex = null;
+        updatePayload.eventTime = null;
         updatePayload.status = 'paused';
       }
 
