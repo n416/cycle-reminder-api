@@ -267,6 +267,56 @@ remindersRouter.post('/:serverId/test-send', protect, protectWrite, async (c) =>
         const db = drizzle(c.env.DB, { schema });
         let finalMessage = sanitizeMessage(message);
         
+        if (/\{\{hitboss-paste\}\}/i.test(finalMessage)) {
+            const allActiveReminders = await db.select().from(schema.reminders).where(
+              and(
+                eq(schema.reminders.serverId, serverId),
+                eq(schema.reminders.status, 'active')
+              )
+            );
+
+            const bossOrder = [
+              { name: 'スケ', regex: /スケロ/ },
+              { name: 'リセ', regex: /リセメン/ },
+              { name: 'ユリ', regex: /ユリア/ },
+              { name: 'グレ', regex: /グレゴ/ },
+              { name: 'ケン', regex: /ケンタ/ },
+              { name: 'アル', regex: /アルサ/ },
+              { name: 'アズ', regex: /アズラエル/ }
+            ];
+
+            let foundBosses: { name: string; timeMs: number; minuteStr: string }[] = [];
+
+            for (const boss of bossOrder) {
+              const bossReminder = allActiveReminders.find(r => r.message && boss.regex.test(r.message));
+              if (bossReminder && bossReminder.eventTime) {
+                let d = new Date(bossReminder.eventTime);
+                if (isNaN(d.getTime())) {
+                  try {
+                    const parsed = JSON.parse(bossReminder.eventTime);
+                    if (parsed && parsed._seconds) {
+                      d = new Date(parsed._seconds * 1000);
+                    }
+                  } catch (e) {}
+                }
+                if (!isNaN(d.getTime())) {
+                  const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+                  const minuteStr = jst.getUTCMinutes().toString().padStart(2, '0');
+                  foundBosses.push({
+                    name: boss.name,
+                    timeMs: d.getTime(),
+                    minuteStr: minuteStr
+                  });
+                }
+              }
+            }
+            
+            foundBosses.sort((a, b) => a.timeMs - b.timeMs);
+            const pasteStrParts = foundBosses.map(b => `${b.name} ${b.minuteStr}`);
+            const pasteStr = pasteStrParts.length > 0 ? pasteStrParts.join('  ') : '（ボス予定なし）';
+            finalMessage = finalMessage.replace(/\{\{hitboss-paste\}\}/ig, pasteStr);
+        }
+
         if (/\{\{all\}\}/i.test(finalMessage)) {
             const now = new Date();
             const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
