@@ -2,6 +2,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import * as schema from './db/schema';
 import { eq, and, lte, asc, inArray, or } from 'drizzle-orm';
 import { HonoEnv } from './hono';
+import { formatMessageContent } from './utils/messageFormatter';
 // Removed @discordjs/rest dependency
 
 const GRACE_PERIOD = 60 * 60 * 1000; // 60分
@@ -90,133 +91,19 @@ const calculateNextNotificationAfterSend = (
   };
 };
 
-const sanitizeMessage = (message: string): string => {
-  return message
-    .replace(/@everyone/g, '＠everyone')
-    .replace(/@here/g, '＠here')
-    .replace(/<@&(\d+)>/g, '＠ロール')
-    .replace(/<@!?(\d+)>/g, '＠ユーザー');
-};
-
 const sendMessage = async (env: HonoEnv['Bindings'], reminder: any, db: ReturnType<typeof drizzle>): Promise<boolean> => {
   try {
-    let finalMessage = sanitizeMessage(reminder.message);
+    let offsets = reminder.notificationOffsets;
+    if (typeof offsets === 'string') {
+      try { offsets = JSON.parse(offsets); } catch (e) { offsets = [0]; }
+    }
+
+    let finalMessage = await formatMessageContent(db, reminder.serverId, reminder.message, {
+      nextOffsetIndex: reminder.nextOffsetIndex,
+      notificationOffsets: offsets
+    });
+
     if (!finalMessage) return true;
-
-    if (/\{\{hitboss-paste\}\}/i.test(finalMessage)) {
-      const allActiveReminders = await db.select().from(schema.reminders).where(
-        and(
-          eq(schema.reminders.serverId, reminder.serverId),
-          eq(schema.reminders.status, 'active')
-        )
-      );
-
-      const bossOrder = [
-        { name: 'スケ', regex: /スケロ/ },
-        { name: 'リセ', regex: /リセメン/ },
-        { name: 'ユリ', regex: /ユリア/ },
-        { name: 'グレ', regex: /グレゴ/ },
-        { name: 'ケン', regex: /ケンタ/ },
-        { name: 'アル', regex: /アルサ/ },
-        { name: 'アズ', regex: /アズラエル/ }
-      ];
-
-      let foundBosses: { name: string; timeMs: number; minuteStr: string }[] = [];
-
-      for (const boss of bossOrder) {
-        const bossReminder = allActiveReminders.find(r => r.message && boss.regex.test(r.message));
-        if (bossReminder && bossReminder.eventTime) {
-          let d = new Date(bossReminder.eventTime);
-          if (isNaN(d.getTime())) {
-            try {
-              const parsed = JSON.parse(bossReminder.eventTime);
-              if (parsed && parsed._seconds) {
-                d = new Date(parsed._seconds * 1000);
-              }
-            } catch (e) { }
-          }
-          if (!isNaN(d.getTime())) {
-            const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
-            const minuteStr = jst.getUTCMinutes().toString().padStart(2, '0');
-            foundBosses.push({
-              name: boss.name,
-              timeMs: d.getTime(),
-              minuteStr: minuteStr
-            });
-          }
-        }
-      }
-
-      foundBosses.sort((a, b) => a.timeMs - b.timeMs);
-      const pasteStrParts = foundBosses.map(b => `${b.name} ${b.minuteStr}`);
-      const pasteStr = pasteStrParts.length > 0 ? pasteStrParts.join('  ') : '（ボス予定なし）';
-      finalMessage = finalMessage.replace(/\{\{hitboss-paste\}\}/ig, pasteStr);
-    }
-
-    if (/\{\{all\}\}/i.test(finalMessage)) {
-      const now = new Date();
-      const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
-
-      // 24時間以内のアクティブなリマインダーを取得
-      const upcomingReminders = await db.select().from(schema.reminders).where(
-        and(
-          eq(schema.reminders.serverId, reminder.serverId),
-          eq(schema.reminders.status, 'active'),
-          lte(schema.reminders.nextNotificationTime, in24Hours)
-        )
-      ).orderBy(asc(schema.reminders.nextNotificationTime));
-
-      let listStr = upcomingReminders.map(r => {
-        if (!r.eventTime) return null;
-        // JSTに変換してフォーマット (HH:MM)
-        let d = new Date(r.eventTime);
-        if (isNaN(d.getTime())) {
-          try {
-            const parsed = JSON.parse(r.eventTime);
-            if (parsed && parsed._seconds) {
-              d = new Date(parsed._seconds * 1000);
-            }
-          } catch (e) {
-            // parse failed
-          }
-        }
-        if (isNaN(d.getTime())) return null;
-
-        const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
-        const timeStr = `${jst.getUTCHours().toString().padStart(2, '0')}:${jst.getUTCMinutes().toString().padStart(2, '0')}`;
-
-        if (r.message && /\{\{all\}\}/i.test(r.message)) return null;
-
-        // メッセージ内のプレースホルダーと改行を除去
-        const cleanMsg = (r.message || '').replace(/\{\{.*?\}\}/g, '').replace(/\n/g, ' ').trim();
-
-        // 通知オフセットの取得
-        let offsets = r.notificationOffsets;
-        if (typeof offsets === 'string') {
-          try { offsets = JSON.parse(offsets); } catch (e) { }
-        }
-        let offsetStr = '';
-        /*
-        if (Array.isArray(offsets) && offsets.length > 0) {
-            offsetStr = `【${offsets.join(',')}分前通知】`;
-        }
-       */
-        return `${timeStr} - ${cleanMsg}${offsetStr}`;
-      }).filter(Boolean).join('\n');
-
-      if (!listStr) {
-        listStr = '予定はありません';
-      }
-      finalMessage = finalMessage.replace(/\{\{all\}\}/ig, `\n**--- 24時間以内の予定 ---**\n${listStr}`);
-    } else if (/\{\{offset\}\}/i.test(finalMessage)) {
-      const offsets = reminder.notificationOffsets || [0];
-      const currentOffset = offsets[reminder.nextOffsetIndex || 0];
-      if (currentOffset > 0) {
-        finalMessage = finalMessage.replace(/\{\{offset\}\}/ig, `まであと ${currentOffset} 分`);
-      } else {
-        finalMessage = finalMessage.replace(/\{\{offset\}\}/ig, 'の時間です！');
-      }
-    }
 
     const isDev = env.NODE_ENV === 'development' || env.FRONTEND_URL?.includes('localhost') || env.FRONTEND_URL?.includes('127.0.0.1');
     if (isDev && reminder.serverId === 'dev_server_1') {
