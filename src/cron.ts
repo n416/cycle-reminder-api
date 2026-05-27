@@ -38,7 +38,16 @@ const calculateNextNotificationAfterSend = (
   let nextCycleTime: Date | null = null;
   const lastCycleTime = new Date(new Date(reminder.nextNotificationTime).getTime() + offsets[currentOffsetIndex] * 60 * 1000);
 
-  switch (reminder.recurrence.type) {
+  let recurrence = reminder.recurrence;
+  if (typeof recurrence === 'string') {
+    try {
+      recurrence = JSON.parse(recurrence);
+    } catch (e) {
+      recurrence = { type: 'none' };
+    }
+  }
+
+  switch (recurrence.type) {
     case 'none':
       nextCycleTime = null;
       break;
@@ -51,13 +60,13 @@ const calculateNextNotificationAfterSend = (
     }
     case 'interval': {
       let nextDate = new Date(lastCycleTime);
-      nextDate.setHours(nextDate.getHours() + reminder.recurrence.hours);
+      nextDate.setHours(nextDate.getHours() + recurrence.hours);
       nextCycleTime = nextDate;
       break;
     }
     case 'weekly': {
       const dayMap: { [key: string]: number } = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
-      const targetDaysOfWeek = new Set((reminder.recurrence.days || []).map((day: string) => dayMap[day]));
+      const targetDaysOfWeek = new Set((recurrence.days || []).map((day: string) => dayMap[day]));
       if (targetDaysOfWeek.size === 0) {
         nextCycleTime = null;
         break;
